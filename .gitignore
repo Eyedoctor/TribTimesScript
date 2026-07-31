@@ -81,3 +81,7 @@ cython_debug/
 
 # Claude Code local settings (machine-specific, not for version control)
 .claude/settings.local.json
+
+# FTP client log / server config, not meant for version control
+WS_FTP.LOG
+.htaccess
