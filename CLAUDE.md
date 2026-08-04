@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is the source/build folder for **The Tribulation Times** (catholicprophecy.info), a daily Catholic prophecy/commentary email-and-web bulletin. It is not a software application — it's a single Python conversion script plus the HTML pages it reads and writes. There is no package manager, build system, test suite, or linter configured.
 
+## Git workflow
+
+After making changes to this project, always commit and push to GitHub — unless the user explicitly says not to for that change.
+
 ## Commands
 
 Run the converter from this directory:

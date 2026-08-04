@@ -695,15 +695,24 @@ def _li_html(li, link_color):
     return " ".join("".join(_walk(c) for c in li.children).split()).strip()
 
 
-def get_following_features(link, soup, doc_order=None):
+def get_following_features(link, soup, doc_order=None, inline_ids=None):
     """
     Collect <ul> or <ol> list items that follow a link.
     Uses document-position logic: finds every <ul>/<ol> in the block,
     then determines which link immediately precedes each list by finding
     the last <a> tag before the list in document order.
     Only returns items if THIS link is that immediately preceding link.
+
+    inline_ids (if given) excludes inline-continuation anchors — the same
+    ones get_news_items skips over — from ownership consideration, so a
+    list's ownership resolves to the CLUSTER PRIMARY (the anchor that
+    actually becomes its own item) rather than to an inline member that
+    never surfaces as its own item and would otherwise strand the list
+    with no owner at all.
     """
+    inline_ids = inline_ids or set()
     feature_items = []
+    _owner_href = (link.get("href") or "").strip()
 
     # Level 1: direct siblings of the link (simple case)
     nxt = link.next_sibling
@@ -726,7 +735,7 @@ def get_following_features(link, soup, doc_order=None):
     # Exclude <li> links — they sit inside lists and would steal ownership
     # of subsequent sibling lists.
     all_links = [a for a in soup.find_all("a", href=True)
-                 if not a.find_parent("li")]
+                 if not a.find_parent("li") and id(a) not in inline_ids]
     post_list_text = []  # text that appears AFTER the last list
 
     # Document-order index: one tree traversal instead of serializing the
@@ -779,7 +788,15 @@ def get_following_features(link, soup, doc_order=None):
                     sm = prev.find("small")
                     if sm and not prev.find("a"):
                         label_found = sm.get_text(" ", strip=True)
-                        break
+                    # Whether or not this <p> matched, it's the paragraph
+                    # immediately before the list — stop here either way.
+                    # Skipping past it (e.g. because it has both a <small>
+                    # AND its own link, like a citation paragraph) would let
+                    # the search walk arbitrarily far back and misattribute
+                    # some unrelated earlier heading as this list's label.
+                    break
+                elif prev.name in ("ul", "ol"):
+                    break  # a different list's territory — stop, no label
                 elif prev.name == "span":
                     # Look for the LAST <small> inside the span
                     smalls = prev.find_all("small")
@@ -800,6 +817,13 @@ def get_following_features(link, soup, doc_order=None):
                 elif prev.name == "br": pass
                 # Don't break on other <ul> — keep walking back
             prev = getattr(prev, "previous_sibling", None)
+        if label_found:
+            # The source often line-wraps a label's text across several
+            # lines (e.g. "Key\nPredictions on Timelines..."); get_text()
+            # preserves those raw newlines since they sit inside a single
+            # text node with nothing to insert a separator between —
+            # collapse them to single spaces before use.
+            label_found = " ".join(label_found.split())
         if label_found and label_found not in existing_labels:
             existing_labels.add(label_found)
             feature_items.append(f"__LABEL__{label_found}")
@@ -808,12 +832,26 @@ def get_following_features(link, soup, doc_order=None):
             if lt:
                 feature_items.append(lt)
 
-    # Collect text after the LAST owned list
+    # Collect text after the LAST owned list. An article can continue for
+    # SEVERAL more paragraphs after its bulleted list — some plain body
+    # paragraphs, some bold-italic subheadings, some paragraphs with only a
+    # bare/parenthetical citation link — before the next genuinely new,
+    # separately-labeled news item begins (or the entry ends). Sweep through
+    # all of them instead of stopping at the first one, so a bold-italic
+    # subheading like "Overall Framing" doesn't silently truncate the rest
+    # of the article.
+    def _p_starts_new_item(p_tag):
+        """True if this <p> looks like a genuinely new labeled news item
+        (a <small> source label together with a link) rather than prose
+        that merely continues with a bare/parenthetical citation link."""
+        return p_tag.find("a", href=True) is not None and p_tag.find("small") is not None
+
     if owned_lists:
         last_list = owned_lists[-1]
         nxt = last_list.next_sibling
-        STOP = ("Ladder of Divine Ascent","Prayer request","This month")
-        for _ in range(8):
+        STOP = ("Ladder of Divine Ascent", "Prayer request",
+                "Have ANY Catholic Question", "This month")
+        for _ in range(40):
             if nxt is None: break
             if isinstance(nxt, NavigableString):
                 t = " ".join(str(nxt).split()).strip()
@@ -821,29 +859,47 @@ def get_following_features(link, soup, doc_order=None):
                     post_list_text.append(t)
             elif hasattr(nxt, "name"):
                 if nxt.name in ("span", "font"):
+                    if nxt.name == "span" and _span_precedes_new_item(nxt, _owner_href):
+                        break  # next item's own label+link — stop, don't flatten it here
                     t = " ".join(nxt.get_text(" ", strip=True).split())
-                    if t and len(t) > 10 and not any(s in t for s in STOP):
+                    if any(s in t for s in STOP):
+                        break
+                    if t and len(t) > 10:
                         post_list_text.append(t)
-                    break
                 elif nxt.name == "p":
-                    # Skip <p><small>LABEL</small></p> patterns (section labels, not content)
-                    sm = nxt.find("small")
-                    if sm and not nxt.find("a"):
-                        break  # it's a label paragraph, not content
+                    if _p_starts_new_item(nxt):
+                        break  # a genuine new labeled item — stop
                     t = " ".join(nxt.get_text(" ", strip=True).split())
-                    if t and len(t) > 10 and not any(s in t for s in STOP):
-                        post_list_text.append(t)
-                    break
-                elif nxt.name == "ul":
-                    break  # another list — stop
+                    if any(s in t for s in STOP):
+                        break
+                    sm = nxt.find("small")
+                    if sm and not nxt.find("a", href=True) and t and len(t) <= 100:
+                        # Bold-italic (sub)heading paragraph with no body
+                        # text of its own — render as a section label and
+                        # keep sweeping past it rather than stopping.
+                        post_list_text.append("__LABEL__" + t)
+                    elif nxt.find("a", href=True):
+                        # Preserve any bare/parenthetical citation link(s)
+                        # as clickable text instead of flattening them away.
+                        post_list_text.append(_li_html(nxt, C["link"]))
+                    elif t and len(t) > 10:
+                        # Split on internal <br><br> so a bold-italic
+                        # subheading or an indented block-quote embedded
+                        # mid-paragraph keeps its own styling/indent instead
+                        # of being flattened by the get_text() above.
+                        for _frag in _p_subheading_fragments(nxt, label_marker="__LABEL__"):
+                            post_list_text.append(_frag)
+                elif nxt.name in ("ul", "ol"):
+                    break  # a list not owned by this link — stop
                 elif nxt.name not in ("br", "small"):
                     break
             nxt = getattr(nxt, "next_sibling", None)
 
-    # Store post-list text so h_news can render it after the bullets
-    # We attach it to feature_items using a sentinel marker
-    if post_list_text:
-        feature_items.append("__POST_LIST__" + post_list_text[0])
+    # Store post-list text so h_news can render it after the bullets —
+    # attached to feature_items via sentinel markers, one per fragment (a
+    # fragment may itself carry an inner __LABEL__ prefix for a subheading).
+    for _t in post_list_text:
+        feature_items.append("__POST_LIST__" + _t)
 
     return feature_items
 
@@ -909,6 +965,96 @@ def _looks_like_new_item_anchor(a, current_url=""):
             break  # some other tag directly before — not a recognized label shape
         prev = getattr(prev, "previous_sibling", None)
     return False
+
+
+def _p_subheading_fragments(p_tag, label_marker=None):
+    """Split a <p>'s children on internal <br><br> boundaries into
+    excerpt-ready fragments, instead of flattening the whole paragraph to
+    plain text with get_text(). Needed for two source shapes a flat
+    get_text() call silently destroys:
+
+    1. A bold(+italic) <small><span> subheading sitting mid-paragraph after
+       a <br><br> break (e.g. "...but acts in the real world.<br><br>
+       <small><span style="font-weight:bold;font-style:italic;">What Is
+       Physical AI</span></small><br>") — get_text() merges its text into
+       the surrounding prose with no styling at all. A detected subheading
+       segment is returned styled like every other subheading in this
+       file: <strong style="...">label</strong> by default, or, when
+       label_marker is given (get_following_features' post-list-text
+       convention), f"{label_marker}{label}".
+    2. A paragraph indented with the source's own margin-left (a
+       block-quote in the raw HTML) — plain-text segments are wrapped in a
+       matching inline-block span when the <p>'s own style has one.
+    """
+    style = (p_tag.get("style") or "").replace(" ", "")
+    ml_m = re.search(r'margin-left:(\d+)px', style)
+
+    segments, current, br_run = [], [], 0
+    for child in p_tag.children:
+        if getattr(child, "name", None) == "br":
+            br_run += 1
+            if br_run >= 2:
+                segments.append(current)
+                current = []
+                br_run = 0
+            continue
+        if isinstance(child, NavigableString) and not str(child).strip():
+            continue  # whitespace between <br> tags doesn't break the run
+        br_run = 0
+        current.append(child)
+    if current:
+        segments.append(current)
+
+    fragments = []
+    for seg in segments:
+        if len(seg) == 1 and getattr(seg[0], "name", None) == "small":
+            sm = seg[0]
+            sp = sm.find("span", style=True)
+            sst = (sp.get("style") or "").replace(" ", "") if sp else ""
+            label = " ".join(sm.get_text(" ", strip=True).split())
+            if ("font-weight:bold" in sst and label and len(label) <= 80
+                    and '"' not in label and '“' not in label):
+                if label_marker is not None:
+                    fragments.append(f'{label_marker}{label}')
+                else:
+                    fragments.append(
+                        f'<strong style="font-family:Verdana,Arial,sans-serif;'
+                        f'font-size:10px;letter-spacing:2px;text-transform:uppercase;'
+                        f'color:#7a1c1c;">{label}</strong>')
+                continue
+        text = " ".join(
+            "".join(str(c) if isinstance(c, NavigableString)
+                    else c.get_text(" ", strip=True) for c in seg).split()
+        ).strip()
+        if not text:
+            continue
+        if ml_m:
+            text = (f'<span style="display:inline-block;'
+                    f'margin-left:{ml_m.group(1)}px;">{text}</span>')
+        fragments.append(text)
+    if not fragments:
+        fallback = " ".join(p_tag.get_text(" ", strip=True).split())
+        if fallback:
+            fragments = [fallback]
+    return fragments
+
+
+def _span_precedes_new_item(span_or_font, current_url=""):
+    """True if this <span>/<font> node is itself the header of a new,
+    separately-labeled news item (e.g. <span><small><span bold>MORE</span>
+    </small>: <a href="...">Title</a></span>) rather than plain body prose
+    continuing the current item. A sweep that flattens this node's text
+    instead of stopping here both strips the embedded link and later
+    duplicates the item once that same link surfaces on its own.
+    """
+    if span_or_font.find("small") is None:
+        return False
+    a = span_or_font.find("a", href=True)
+    if a is None:
+        return False
+    href = (a.get("href") or "").strip()
+    return bool(href and not skip_url(href) and a.get_text(strip=True)
+                and href != current_url)
 
 
 def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=None):
@@ -1125,10 +1271,31 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                         ia_href = inner_a.get("href", "")
                         if ia_href and not skip_url(ia_href) and inner_a.get_text(strip=True):
                             return True  # next news item — stop
-                    t = nxt.get_text(" ", strip=True)
-                    _fresh_para[0] = True  # a <p> is always its own paragraph
-                    add(t)  # add() filters stop phrases
+                    # Split on internal <br><br> so a bold-italic subheading
+                    # or an indented block-quote embedded mid-paragraph keeps
+                    # its own styling instead of being flattened by get_text().
+                    for _frag in _p_subheading_fragments(nxt):
+                        _fresh_para[0] = True  # each fragment is its own paragraph
+                        add(_frag)  # add() filters stop phrases
+                elif name in ("ul", "ol"):
+                    # A bullet/feature list is owned and rendered entirely by
+                    # get_following_features. Previously this case fell
+                    # through unhandled and the walk silently continued past
+                    # the list, which could absorb whatever text follows it
+                    # as if it were this item's own excerpt (duplicating or
+                    # misattributing content that belongs after the list).
+                    # Stop here instead — matches the Level-2 walker below.
+                    return False
                 elif name in ("span", "font", "b", "i", "em"):
+                    # A <span>/<font> that itself wraps a source label and a
+                    # real link (e.g. the next item's own "<small><span
+                    # bold>MORE</span></small>: <a href=...>Title</a>"
+                    # header) is the start of a NEW item, not body prose —
+                    # stop instead of flattening it into this item's excerpt
+                    # (which would strip its link and duplicate it once that
+                    # link surfaces as its own item).
+                    if _span_precedes_new_item(nxt, _current_url):
+                        return True
                     style = nxt.get("style", "") if hasattr(nxt, "get") else ""
                     t = nxt.get_text(" ", strip=True)
                     # Short bold non-italic text = source label — stop
@@ -1161,12 +1328,18 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
     hit = walk_siblings(link.next_sibling)
 
     # Level 1.5: if the link lives INSIDE its <small> source label
-    # (e.g. <small>EXCERPT <a ...>title</a></small>: text...), the excerpt
-    # text starts right after the </small> — walk from there, then climb.
+    # (e.g. <small>EXCERPT <a ...>title</a></small>: text..., or the link
+    # nested one level deeper still inside a bold <span> within the
+    # <small>, e.g. <small><span bold>VIA <a>GROK</a></span></small>: text),
+    # the excerpt text starts right after the </small> — walk from there,
+    # then climb. find_parent (not a direct-parent check) is needed so the
+    # span-wrapped case is caught too; otherwise the trailing text of that
+    # item is never reached by any walk and silently vanishes.
     parent = link.parent
-    if not hit and parent is not None and parent.name == "small":
-        hit = walk_siblings(parent.next_sibling)
-        parent = parent.parent
+    _small_anc = link.find_parent("small")
+    if not hit and _small_anc is not None:
+        hit = walk_siblings(_small_anc.next_sibling)
+        parent = _small_anc.parent
 
     # Level 2: walk siblings of parent span — only collect text between
     # this link's parent span and the next <ul> (which marks the AI REPORT boundary).
@@ -1355,6 +1528,45 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                     if is_ladder:
                                         break
                                 elif n.name == "p":
+                                    # A sibling <p> carrying its own link is a
+                                    # distinct item's paragraph in this
+                                    # document's convention (every real item
+                                    # heads its own <p> with at least a
+                                    # headline <a>) — mirrors the same guard
+                                    # already present in the Level-1 walker's
+                                    # own <p> handling above. Without it, this
+                                    # fallback walked straight through every
+                                    # subsequent news item's paragraph up to
+                                    # the next <ul>, duplicating each one's
+                                    # full text into every preceding item.
+                                    _inner_a = n.find("a", href=True)
+                                    if _inner_a:
+                                        _ia_href = _inner_a.get("href", "")
+                                        if (_ia_href and not skip_url(_ia_href)
+                                                and _inner_a.get_text(strip=True)):
+                                            break  # next news item — stop
+                                    # A <p> that introduces a following bullet
+                                    # list (e.g. "...projected timelines:")
+                                    # is that list's heading label, which
+                                    # get_following_features already detects
+                                    # and renders on its own — stop instead
+                                    # of also absorbing it here as a plain
+                                    # trailing paragraph (duplicate text).
+                                    _peek, _steps2 = n.next_sibling, 0
+                                    _precedes_list = False
+                                    while _peek is not None and _steps2 < 5:
+                                        if isinstance(_peek, NavigableString):
+                                            if str(_peek).strip():
+                                                break
+                                        elif getattr(_peek, "name", None) in ("ul", "ol"):
+                                            _precedes_list = True
+                                            break
+                                        elif getattr(_peek, "name", None) != "br":
+                                            break
+                                        _steps2 += 1
+                                        _peek = _peek.next_sibling
+                                    if _precedes_list:
+                                        break
                                     t = " ".join(n.get_text(" ", strip=True).split())
                                     WALK_STOP = ("Ladder of Divine Ascent", "Prayer request",
                                                  "This month", "Have ANY Catholic")
@@ -1363,17 +1575,13 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                     if "Ladder of Divine Ascent" in t or is_ladder:
                                         break  # stop walking at Ladder paragraph
                                     if not any(s in t for s in WALK_STOP) and not is_ladder:
-                                        # Check if <p> contains <small><strong>heading</strong></small>
-                                        # → render as bold crimson label, not plain text
-                                        strong = n.find("strong")
-                                        sm = n.find("small")
-                                        _fresh_para[0] = True  # a <p> is always its own paragraph
-                                        if strong and sm and len(t) <= 80 and '"' not in t:
-                                            add(f'<strong style="font-family:Verdana,Arial,sans-serif;'
-                                                f'font-size:10px;letter-spacing:2px;text-transform:uppercase;'
-                                                f'color:#7a1c1c;">{t}</strong>')
-                                        else:
-                                            add(t)
+                                        # Split on internal <br><br> so a bold-italic
+                                        # subheading or an indented block-quote embedded
+                                        # mid-paragraph keeps its own styling instead of
+                                        # being flattened by the get_text() above.
+                                        for _frag in _p_subheading_fragments(n):
+                                            _fresh_para[0] = True  # each fragment is its own paragraph
+                                            add(_frag)
                             n = getattr(n, "next_sibling", None)
                     walk_until_list(parent.next_sibling)
 
@@ -1407,6 +1615,91 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                 _nxt = _nxt.next_sibling
 
     return excerpts
+
+
+def _capture_leading_turns(link):
+    """Capture dialogue/prose that precedes `link` within its own
+    enclosing <p>, for the shape where several speaker turns share ONE
+    paragraph and only the LAST turn happens to carry a link — e.g. a
+    multi-question interview:
+
+        <p><small>WWNN</small>: Question one...<br><br>
+           <small>Rev. Larrey</small>: Answer one...<br><br>
+           <small>WWNN</small>: Question two...<br><br>
+           <small>Rev. Larrey</small>: ...one excellent use is
+           "<a href="...">Magisterium AI,</a>" founded by...</p>
+
+    Every walker in this file only looks FORWARD from a link, so text
+    sitting entirely BEFORE the one link in a paragraph like this has no
+    path that ever collects it — it silently vanishes. This returns
+    (leading_fragments, lead_in):
+      leading_fragments -- excerpt-style fragments (bold <strong> label +
+        text) for each EARLIER turn, in order, to prepend ahead of the
+        item's own excerpts.
+      lead_in -- plain text from the SAME turn as the link, before the
+        link itself (no label -- the item's own source label already
+        covers this turn), to be woven into a leading paragraph so the
+        link renders inline within its sentence instead of disappearing.
+    Returns ([], "") in the common case (a link that already heads its
+    own paragraph, i.e. there's nothing of substance before it).
+    """
+    p = link.find_parent("p")
+    if p is None:
+        return [], ""
+    turns = []          # completed (label, text) turns, in order
+    cur_label = None
+    cur_parts = []
+    br_run = 0
+
+    def flush():
+        nonlocal cur_label, cur_parts
+        text = " ".join(" ".join(cur_parts).split()).strip(" :")
+        if text or cur_label:
+            turns.append((cur_label, text))
+        cur_label, cur_parts = None, []
+
+    reached = False
+    for node in p.children:
+        if node is link:
+            reached = True
+            break
+        if getattr(node, "name", None) == "br":
+            br_run += 1
+            if br_run >= 2:
+                flush()
+            continue
+        br_run = 0
+        if getattr(node, "name", None) == "small":
+            lbl = node.get_text(" ", strip=True).strip(" :")
+            if lbl:
+                flush()
+                cur_label = lbl
+            continue
+        if isinstance(node, NavigableString):
+            t = str(node).strip(" :\n\xa0")
+            if t:
+                cur_parts.append(t)
+        elif hasattr(node, "get_text"):
+            t = node.get_text(" ", strip=True)
+            if t:
+                cur_parts.append(t)
+    if not reached:
+        return [], ""  # link isn't a direct child of this <p> — not our shape
+    flush()
+    if not turns:
+        return [], ""
+    *earlier, last = turns
+    lead_in = last[1] if last else ""
+    fragments = []
+    for lbl, txt in earlier:
+        if lbl:
+            fragments.append(
+                f'<strong style="font-family:Verdana,Arial,sans-serif;'
+                f'font-size:10px;letter-spacing:2px;text-transform:uppercase;'
+                f'color:#7a1c1c;">{lbl}</strong>')
+        if txt:
+            fragments.append(txt)
+    return fragments, lead_in
 
 
 def get_news_items(block):
@@ -1503,8 +1796,17 @@ def get_news_items(block):
             continue
 
         link_text = clean(link)
-        if not link_text or len(link_text) < 5:
+        if not link_text:
             continue
+        if len(link_text) < 5:
+            # A short anchor text (e.g. "GROK" in "VIA <a>GROK</a>") isn't
+            # junk when it's embedded in a larger <small> label that gives
+            # it real context — only skip when there's nothing more to it
+            # (a bare stray "»"-style anchor with no surrounding label).
+            _sm_anc = link.find_parent("small")
+            _sm_text_len = len(_sm_anc.get_text(strip=True)) if _sm_anc else 0
+            if _sm_text_len < 5:
+                continue
         # Headline-group member: emit the whole group at its first link
         if url in headline_member:
             if url in headline_first and url not in seen:
@@ -1595,16 +1897,28 @@ def get_news_items(block):
         # Links inside <li> tags: extract as items if they have a source label
         # (e.g. NEWS REPORTS section where each <li> is a separate news item)
         # But skip bare links inside <li> (no source label = pure bullet content)
+        def _child_precedes_link(child):
+            """True if `link` is this child itself OR nested somewhere
+            inside it — needed because the label-carrying <small> and the
+            link don't always sit at the same nesting depth (e.g. the link
+            can be nested small>span>a rather than a direct <small>
+            sibling), in which case a plain `child is link` identity check
+            never fires and the scan below would run past the link
+            entirely, misreading later content as part of the label."""
+            if child is link:
+                return True
+            return hasattr(child, "descendants") and any(d is link for d in child.descendants)
+
         in_li = link.find_parent("li")
         if in_li:
             # Check if this <li> has a source label (<small> before the link)
             li_source = ""
             for child in in_li.children:
-                if child is link:
-                    break
                 if hasattr(child, 'name') and child.name == 'small':
-                    li_source = child.get_text(strip=True)
-                elif hasattr(child, 'name') and child.name == 'a' and child is not link:
+                    li_source = child.get_text(" ", strip=True)
+                if _child_precedes_link(child):
+                    break
+                if hasattr(child, 'name') and child.name == 'a' and child is not link:
                     break  # another link before ours — stop
             if not li_source:
                 continue  # no source label → skip (pure bullet)
@@ -1615,10 +1929,10 @@ def get_news_items(block):
         if in_p:
             p_source = ""
             for child in in_p.children:
-                if child is link:
-                    break
                 if hasattr(child, 'name') and child.name == 'small':
-                    p_source = child.get_text(strip=True)
+                    p_source = child.get_text(" ", strip=True)
+                if _child_precedes_link(child):
+                    break
             if not p_source:
                 continue  # no source in <p> → skip
 
@@ -1656,7 +1970,8 @@ def get_news_items(block):
                 source = _rv
         excerpts      = get_following_excerpts(link, _ladder_text=_block_ladder,
                                                   _current_url=url, _consumed=seen)
-        feature_items = get_following_features(link, soup, doc_order=_doc_order)
+        feature_items = get_following_features(link, soup, doc_order=_doc_order,
+                                                inline_ids=_inline_a_ids)
 
         # Remove excerpts that are continuation fragments already in link_text
         # Check if the excerpt text (stripped of punctuation) overlaps with link_text
@@ -1750,9 +2065,33 @@ def get_news_items(block):
                     "url":           "",
                     "link_text":     "",
                     "excerpts":      _cluster_fragments,
-                    "feature_items": [],
+                    # Use the feature list already computed for this link
+                    # above (not discarded) — a cluster primary can still
+                    # legitimately own a following bulleted list (e.g. a
+                    # citation cluster like "(Decrypt; Business Insider)"
+                    # that precedes a bullet list of related claims).
+                    "feature_items": feature_items,
                 })
                 continue
+
+        # Same-paragraph content that sits BEFORE this link (see
+        # _capture_leading_turns) — every other walker in this file only
+        # looks forward from a link, so a multi-turn paragraph where the
+        # link only appears in the final turn would otherwise lose every
+        # earlier turn, and even the lead-in clause of its own turn.
+        _leading_fragments, _lead_in = _capture_leading_turns(link)
+        if _leading_fragments or _lead_in:
+            if _lead_in:
+                _anchor_html = link.get_text(strip=False)
+                _lead_para = (f'{_lead_in} <a href="{url}" target="_blank" '
+                              f'style="color:{C["link"]};font-weight:bold;">{_anchor_html}</a>')
+                excerpts = _leading_fragments + [_lead_para] + excerpts
+                # The link now flows inline inside that leading paragraph
+                # rather than heading its own headline/excerpt block.
+                link_text = ""
+                url = ""
+            else:
+                excerpts = _leading_fragments + excerpts
 
         items.append({
             "source":        source,
@@ -1794,8 +2133,12 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
     _weight = "font-weight:bold;" if body_bold else ""
     all_excerpts = [p for p in (excerpts or []) if p.strip(": \u00a0")]
 
-    if feature_items and len(all_excerpts) > 1 and len(all_excerpts) <= 6:
-        # Short item with a feature list: excerpts before list, last as concluding para
+    _last_is_label = bool(all_excerpts) and (
+        all_excerpts[-1].startswith("<strong") and all_excerpts[-1].endswith("</strong>"))
+    if feature_items and len(all_excerpts) > 1 and len(all_excerpts) <= 6 and not _last_is_label:
+        # Short item with a feature list: excerpts before list, last as concluding para.
+        # A trailing subheading label is never eligible for this move — it belongs
+        # right where it appeared in the source flow, not after an unrelated bullet list.
         pre_excerpts  = all_excerpts[:-1]
         post_excerpts = all_excerpts[-1:]
     else:
@@ -1822,10 +2165,17 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
 
     concluding_html = ""
     for para in post_excerpts:
-        concluding_html += (
-            f'<p style="font-family:Verdana,Arial,sans-serif;font-size:15px;'
-            f'{_weight}color:{C["ink_mid"]};line-height:1.7;margin:6px 0 0 0;">{para}</p>'
-        )
+        if para.startswith("<strong") and para.endswith("</strong>"):
+            concluding_html += (
+                f'<div style="font-family:Verdana,Arial,sans-serif;font-size:10px;'
+                f'font-weight:bold;letter-spacing:1px;text-transform:uppercase;'
+                f'color:{C["crimson"]};margin:10px 0 4px 0;">{para}</div>'
+            )
+        else:
+            concluding_html += (
+                f'<p style="font-family:Verdana,Arial,sans-serif;font-size:15px;'
+                f'{_weight}color:{C["ink_mid"]};line-height:1.7;margin:6px 0 0 0;">{para}</p>'
+            )
 
     feat_html = ""
     post_list_html = ""
@@ -1867,10 +2217,21 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
         if rows:
             feat_html = rows
         for p in post_items:
-            post_list_html += (
-                f'<p style="font-family:Verdana,Arial,sans-serif;font-size:15px;'
-                f'color:{C["ink_mid"]};line-height:1.7;margin:6px 0 0 0;">{p}</p>'
-            )
+            if p.startswith("__LABEL__"):
+                # Bold-italic subheading swept in from the article's
+                # continuing prose (e.g. "Overall Framing") — same styling
+                # as the section-header divs above, not a plain paragraph.
+                p_label = p[len("__LABEL__"):]
+                post_list_html += (
+                    f'<div style="font-family:Verdana,Arial,sans-serif;font-size:10px;'
+                    f'font-weight:bold;letter-spacing:1px;text-transform:uppercase;'
+                    f'color:{C["crimson"]};margin:10px 0 4px 0;">{p_label}</div>'
+                )
+            else:
+                post_list_html += (
+                    f'<p style="font-family:Verdana,Arial,sans-serif;font-size:15px;'
+                    f'color:{C["ink_mid"]};line-height:1.7;margin:6px 0 0 0;">{p}</p>'
+                )
 
     # When the source label IS the link (self-labeling item, e.g. an X news
     # post "X NEWS REPORT: ...") there is no separate headline. Render the
@@ -2066,6 +2427,7 @@ def _detect_inline_and_clusters(soup):
     inline_ids = set()
     cluster_of = {}  # id(inline_a) -> primary_a (the object itself)
     prev_a = None
+    prev_block = None
     for a in soup.find_all("a", href=True):
         href = (a.get("href") or "").strip()
         if not href or skip_url(href):
@@ -2079,20 +2441,36 @@ def _detect_inline_and_clusters(soup):
         # would falsely promote the previous link to a cluster primary.
         if not a.get_text(strip=True):
             continue
+        # The nearest enclosing <p>/<li> is this document's actual paragraph
+        # unit. Two anchors in DIFFERENT such containers are never the same
+        # cluster, no matter how few (or zero) <br> tags separate them —
+        # e.g. adjacent "</p><p>" items with no <br> at all between them,
+        # which the old <br>-count-only heuristic wrongly fused into one
+        # cluster (swallowing an entire following news item's content).
+        cur_block = a.find_parent(["p", "li"])
         if prev_a is not None:
-            br = 0
-            cur = prev_a.next_element
-            while cur is not None and cur is not a:
-                if hasattr(cur, "name") and cur.name == "br":
-                    br += 1
-                    if br >= 2:
-                        break
-                cur = cur.next_element
-            if br < 2:
-                inline_ids.add(id(a))
-                cluster_of[id(a)] = prev_a
-                continue  # cluster anchor stays fixed on first link
+            if cur_block is not None or prev_block is not None:
+                boundary_crossed = cur_block is not prev_block
+            else:
+                # Neither anchor sits in a <p>/<li> — fall back to the
+                # original <br>-count heuristic for older markup shapes
+                # that don't use paragraph tags at all.
+                boundary_crossed = False
+            if not boundary_crossed:
+                br = 0
+                cur = prev_a.next_element
+                while cur is not None and cur is not a:
+                    if hasattr(cur, "name") and cur.name == "br":
+                        br += 1
+                        if br >= 2:
+                            break
+                    cur = cur.next_element
+                if br < 2:
+                    inline_ids.add(id(a))
+                    cluster_of[id(a)] = prev_a
+                    continue  # cluster anchor stays fixed on first link
         prev_a = a
+        prev_block = cur_block
     return inline_ids, cluster_of
 
 
