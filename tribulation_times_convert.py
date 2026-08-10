@@ -660,6 +660,23 @@ def get_source_for_link(link):
                         and '"' not in t and '\u201c' not in t):
                     return t
             elif prev.name in ("span", "b"):
+                # A <span> that itself just wraps a <small> label (e.g.
+                # <span><small><span bold>X</span></small>: </span><a>...)
+                # — pull the label out of that nested <small> first, with
+                # the same short ALL-CAPS fallback the `small` branch above
+                # uses. Needed for single-letter/short labels like "X"
+                # (this site's marker for an X/Twitter item): the generic
+                # len(t) > 2 check below would otherwise silently reject them.
+                _nested_small = prev.find("small")
+                if _nested_small is not None:
+                    _ns_norm = " ".join(
+                        _nested_small.get_text(" ", strip=True).strip(" :\n\xa0").split())
+                    _ns_all_caps = bool(_ns_norm) and all(
+                        w == w.upper() and (w.isalpha() or w.isdigit())
+                        for w in _ns_norm.split())
+                    if (_ns_norm and _ns_all_caps and len(_ns_norm) <= 40
+                            and '"' not in _ns_norm):
+                        return _ns_norm
                 t = prev.get_text(" ", strip=True).strip(" :")
                 # Reject if too long or contains quotes — it's content, not a label
                 if (t and len(t) > 2 and not t.startswith("(")
@@ -1051,7 +1068,25 @@ def _span_precedes_new_item(span_or_font, current_url=""):
         return False
     a = span_or_font.find("a", href=True)
     if a is None:
-        return False
+        # The label's <small> may be wrapped together with its trailing
+        # ": " in this span, with the actual link sitting OUTSIDE it as a
+        # sibling instead of nested inside, e.g.
+        # <span><small>X</small>: </span><a href="...">Title</a>.
+        nxt = span_or_font.next_sibling
+        for _ in range(3):
+            if nxt is None:
+                return False
+            if isinstance(nxt, NavigableString):
+                if str(nxt).strip():
+                    return False
+            elif getattr(nxt, "name", None) == "a":
+                a = nxt
+                break
+            else:
+                return False
+            nxt = nxt.next_sibling
+        if a is None:
+            return False
     href = (a.get("href") or "").strip()
     return bool(href and not skip_url(href) and a.get_text(strip=True)
                 and href != current_url)
@@ -1509,6 +1544,24 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                                     if hasattr(pk2,"name") and pk2.name=="a":
                                                         has_lnk2=True; break
                                                     pk2=getattr(pk2,"next_sibling",None)
+                                                if not has_lnk2:
+                                                    # The label's <small> ran out of
+                                                    # siblings inside the wrapping span —
+                                                    # the link may sit just OUTSIDE it
+                                                    # instead, e.g. <span><small>X</small>:
+                                                    # </span><a href="...">Title</a>.
+                                                    pk3 = n.next_sibling
+                                                    for _ in range(3):
+                                                        if pk3 is None: break
+                                                        if isinstance(pk3, NavigableString):
+                                                            if str(pk3).strip(" :\n\xa0"):
+                                                                break
+                                                        elif hasattr(pk3, "name"):
+                                                            if (pk3.name == "a" and pk3.get("href")
+                                                                    and pk3.get_text(strip=True)):
+                                                                has_lnk2 = True
+                                                            break
+                                                        pk3 = getattr(pk3, "next_sibling", None)
                                                 if not has_lnk2:
                                                     lbl2 = child.get_text(" ", strip=True)
                                                     if lbl2: add(f'<strong>{lbl2}</strong>')
