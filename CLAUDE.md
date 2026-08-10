@@ -46,6 +46,7 @@ py -3 tribulation_times_convert.py
    - Finds the insertion point via `INJECT_MARKER` (`<!-- !!NEW_ENTRY_INJECT_POINT!! -->`) if present, else falls back to just-after-the-banner-image or just-before-the-first-existing-date-heading heuristics.
    - Also opportunistically fixes W3C-invalid `<meta>` tags and injects a responsive-image CSS rule into the archive's `<head>` if missing.
    - Writes atomically like `news4.html`.
+   - **Re-run protection means archived entries never get re-synced automatically.** If `news4.html`'s entry for *today* is edited after it's already been archived (a bug fix, a typo correction, a manual content merge, etc.), `news2.html`'s copy of that same entry is now stale and re-running the converter will NOT update it — the date heading already exists, so it's skipped. Whenever you make a change to today's entry in `news4.html`, apply the identical change to `news2.html`'s copy of that entry by hand so the two stay in sync. This only applies to the current day being actively worked on this session — don't retroactively touch earlier entries already archived earlier in the month; they aren't likely to be scrutinized and aren't worth the risk of an unrelated diff.
 
 ## Settings vs. scraped content
 
