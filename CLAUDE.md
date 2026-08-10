@@ -51,6 +51,14 @@ py -3 tribulation_times_convert.py
 
 The `SETTINGS` block at the top of the file (`SUBSCRIBE_URL`, `ARCHIVES_URL`, `LADDER_URL`, `GA_ACCOUNT`, `COLORS`, etc.) holds the **modernized site's own fixed values**, which in some cases deliberately differ from what's hardcoded in the raw `news.html` (e.g. `ARCHIVES_URL` points at `tribtimes.com`, not `catholicprophecy.info`; `LADDER_URL` is `http://`, not `https://`). Don't "fix" these to match `news.html` under the assumption it's a scraping bug — that's intentional site configuration and should only change if the user asks. The one exception is `BIBLE_YEAR_URL`/`BIBLE_YEAR_LABEL`, which `main()` deliberately re-derives from the *current* month's link in `news.html` on every run (the hardcoded constant is only a fallback).
 
+## Typo correction
+
+`news.html` is hand-typed by a non-technical site owner and periodically contains obvious single-word typos in source labels or headlines (e.g. `CHURH` instead of `CHURCH`). When working on this repo — running the converter, reviewing generated output, or otherwise touching a day's entry — proactively catch and fix these rather than silently carrying them through the pipeline: correct the typo in `news.html` itself (the source of truth) and regenerate `news4.html`/`news2.html` from it, rather than patching only the generated output.
+
+Use judgment about what counts as "obvious":
+- Fix: plain misspellings of ordinary/common words (`CHURH` → `CHURCH`, `recieve` → `receive`).
+- Don't "fix": archaic or period-accurate spelling in quoted historical/devotional text (e.g. the weekly Ladder of Divine Ascent excerpt, which is a translated centuries-old text and may contain unusual wording that looks off but is faithful to the source translation), direct quotations, proper nouns, foreign names, or anything you're not confident is actually a typo rather than the source's intended wording. When in doubt, ask rather than silently "correcting" someone's words.
+
 ## Output files
 
 - `news4.html` — generated daily page; this is what gets uploaded to the live site as the new `news.html`.
