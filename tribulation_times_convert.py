@@ -2155,7 +2155,29 @@ def get_news_items(block):
             "body_bold":     body_bold,
         })
 
-    return items
+    # A bare "DONATE" item is never independent content — it's always a
+    # continuation of whatever organization/appeal the immediately
+    # preceding item just described (e.g. "AID TO THE CHURCH IN NEED"
+    # followed by its own "DONATE: <link>"). Fold it into that item as a
+    # sub-label + link, matching how a trailing subheading is already
+    # rendered elsewhere in this file, instead of surfacing it as its own
+    # disconnected card with no context for what the link is for.
+    merged_items = []
+    for it in items:
+        if merged_items and (it.get("source") or "").strip().upper() == "DONATE":
+            prev = merged_items[-1]
+            donate_frag = [f'<strong>{it["source"].strip()}</strong>']
+            if it.get("url"):
+                link_text = it.get("link_text") or it["url"]
+                donate_frag.append(
+                    f'<a href="{it["url"]}" target="_blank" '
+                    f'style="color:{C["link"]};font-weight:bold;">{link_text}</a>')
+            donate_frag.extend(it.get("excerpts") or [])
+            prev["excerpts"] = list(prev.get("excerpts") or []) + donate_frag
+            continue
+        merged_items.append(it)
+
+    return merged_items
 
 
 
