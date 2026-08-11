@@ -204,6 +204,26 @@ def get_scripture(block):
         block
     )
     if not start_m:
+        # Fallback: the epigraph isn't always italicized (the raw HTML is
+        # hand-edited and this styling sometimes gets dropped). Accept a
+        # bare "(Book Ch:V)" match only if it occurs before the first REAL
+        # (non-empty) bold source label in the block -- i.e. it's still
+        # positioned as the lead-in epigraph, not a scripture citation
+        # quoted inside a later news item's body (which always follows
+        # that first label).
+        bare_m = re.search(
+            r'\(\s*(?:[1-3]\s*)?[A-Za-z][A-Za-z]{0,5}\.?\s+\d+:\d+',
+            block
+        )
+        if bare_m:
+            _label_pos = len(block)
+            for _lm in re.finditer(r'font-weight:\s*bold[^"]*"[^>]*>([^<]*)', block):
+                if _lm.group(1).strip():
+                    _label_pos = _lm.start()
+                    break
+            if bare_m.start() < _label_pos:
+                start_m = bare_m
+    if not start_m:
         return "", ""
     start = start_m.start()
     # Scripture ends at the first bold source label / quote that follows it.
@@ -514,6 +534,53 @@ def get_ladder_step(block):
     return (step_num, step_title)
 
 
+def _preceding_section_heading(small_tag):
+    """If `small_tag` (a source-label <small>, e.g. "VIA") is immediately
+    preceded — skipping only whitespace/<br> — by another bare <small>
+    heading with its own bold text and no link of its own (e.g. a
+    standalone "FROM THE MAILBAG" line ahead of a "VIA <name>" byline),
+    return that heading text. Otherwise ''. Lets a compound label like
+    "FROM THE MAILBAG — VIA" be built instead of silently losing the
+    section heading, which sits outside the label small itself.
+
+    `small_tag` itself is often the very first child of an enclosing
+    <span> wrapper (e.g. "<span><small>VIA</small> <a>...</a>...</span>"),
+    in which case its own previous_sibling is None even though a heading
+    precedes the whole span — so when that's the case, climb out to the
+    wrapper and check ITS previous sibling chain too.
+    """
+    def _scan(start):
+        prev = start
+        steps = 0
+        while prev is not None and steps < 4:
+            steps += 1
+            if isinstance(prev, NavigableString):
+                if str(prev).strip():
+                    return None
+                prev = prev.previous_sibling
+                continue
+            if getattr(prev, "name", None) == "br":
+                prev = prev.previous_sibling
+                continue
+            if getattr(prev, "name", None) == "small":
+                if prev.find("a", href=True) is not None:
+                    return None
+                t = " ".join(prev.get_text(" ", strip=True).strip(" :").split())
+                letters = "".join(ch for ch in t if ch.isalpha())
+                if t and letters and len(t) <= 40 and letters == letters.upper():
+                    return t
+                return None
+            return None
+        return None
+
+    heading = _scan(small_tag.previous_sibling)
+    if heading is None and small_tag.previous_sibling is None:
+        parent = small_tag.parent
+        if parent is not None and parent.name in ("span", "font", "b"):
+            heading = _scan(parent.previous_sibling)
+    return heading or ""
+
+
 def get_source_for_link(link):
     """
     Extract the source label for a news link using pattern-aware logic.
@@ -623,7 +690,8 @@ def get_source_for_link(link):
                     # Reject if too long (> 80 chars) or contains quotes — it's content, not a label
                     if (t and len(t) > 2 and not t.startswith("(")
                             and len(t) <= 160 and '"' not in t and '“' not in t):
-                        return t
+                        _heading = _preceding_section_heading(prev)
+                        return f"{_heading} — {t}" if _heading else t
                     # If span too long, scan its trailing children for a short ALL-CAPS label
                     for _child in reversed(list(last_span.children)):
                         if isinstance(_child, NavigableString):
@@ -1256,6 +1324,17 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                 # text and then rendered a second time.
                                 has_link_ahead = True
                                 break
+                            # A container (e.g. <span>) that itself WRAPS the
+                            # next item's label+link still counts as a link
+                            # ahead — see the matching comment in the Level-2
+                            # walker's identical check below.
+                            _peek_a = peek.find("a", href=True) if hasattr(peek, "find") else None
+                            if _peek_a:
+                                _peek_t = _peek_a.get_text(strip=True)
+                                _peek_h = _peek_a.get("href", "")
+                                if _peek_t and _peek_h and not _peek_h.startswith("mailto:"):
+                                    has_link_ahead = True
+                                break
                             checked += 1
                             peek = getattr(peek, "next_sibling", None)
                     if has_link_ahead:
@@ -1373,7 +1452,23 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
     parent = link.parent
     _small_anc = link.find_parent("small")
     if not hit and _small_anc is not None:
-        hit = walk_siblings(_small_anc.next_sibling)
+        # Level 1.4: if the link is nested inside a wrapper (e.g. a bold
+        # <span>) that itself has further siblings BEFORE the <small>
+        # closes -- i.e. the raw HTML never actually closed the <small>
+        # after just the label, so the quote's own body text continues
+        # inside it (e.g. "<small><span>EXCERPT<a>Title</a></span><span>
+        # body text...</span>more body</small>") -- walk those first, or
+        # that body text is never reached by any walker and silently
+        # dropped.
+        _link_container = link
+        _p = link.parent
+        while _p is not None and _p is not _small_anc:
+            _link_container = _p
+            _p = _p.parent
+        if _link_container is not link:
+            hit = walk_siblings(_link_container.next_sibling)
+        if not hit:
+            hit = walk_siblings(_small_anc.next_sibling)
         parent = _small_anc.parent
 
     # Level 2: walk siblings of parent span — only collect text between
@@ -1487,6 +1582,22 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                             # get_following_features rather than
                                             # absorbing it as a prose subheading.
                                             has_lnk = True; break
+                                        # A container (e.g. <span>) that itself
+                                        # WRAPS the next item's label+link (as
+                                        # with "VIA <a>Frank Rega</a>" sitting
+                                        # inside an outer <span>) still counts
+                                        # as a link ahead -- otherwise a bare
+                                        # heading like "FROM THE MAILBAG" gets
+                                        # absorbed as this item's own trailing
+                                        # subheading instead of stopping before
+                                        # the next item.
+                                        _pk_a = pk.find("a", href=True) if hasattr(pk, "find") else None
+                                        if _pk_a:
+                                            _pk_t = _pk_a.get_text(strip=True)
+                                            _pk_h = _pk_a.get("href", "")
+                                            if _pk_t and _pk_h and not _pk_h.startswith("mailto:"):
+                                                has_lnk = True
+                                            break
                                         _ck += 1
                                         pk = getattr(pk, "next_sibling", None)
                                     if has_lnk: break
@@ -1857,7 +1968,11 @@ def get_news_items(block):
             # it real context — only skip when there's nothing more to it
             # (a bare stray "»"-style anchor with no surrounding label).
             _sm_anc = link.find_parent("small")
-            _sm_text_len = len(_sm_anc.get_text(strip=True)) if _sm_anc else 0
+            # NOTE: must use a space separator here -- without it adjacent
+            # text/tag fragments collapse together (e.g. "VIA " + "X" ->
+            # "VIAX", 4 chars) and a legitimately-labeled short anchor like
+            # "VIA <a>X</a>" gets miscounted as bare junk and dropped.
+            _sm_text_len = len(_sm_anc.get_text(" ", strip=True)) if _sm_anc else 0
             if _sm_text_len < 5:
                 continue
         # Headline-group member: emit the whole group at its first link
@@ -1968,7 +2083,14 @@ def get_news_items(block):
             li_source = ""
             for child in in_li.children:
                 if hasattr(child, 'name') and child.name == 'small':
-                    li_source = child.get_text(" ", strip=True)
+                    if child.find("a", href=True) is not None:
+                        # The <small> wraps the link itself (not just a label
+                        # ahead of it) -- its raw get_text() would swallow any
+                        # trailing excerpt prose nested in the same <small> as
+                        # the link. Isolate just the label instead.
+                        li_source = get_source_for_link(link)
+                    else:
+                        li_source = child.get_text(" ", strip=True)
                 if _child_precedes_link(child):
                     break
                 if hasattr(child, 'name') and child.name == 'a' and child is not link:
@@ -1983,7 +2105,13 @@ def get_news_items(block):
             p_source = ""
             for child in in_p.children:
                 if hasattr(child, 'name') and child.name == 'small':
-                    p_source = child.get_text(" ", strip=True)
+                    if child.find("a", href=True) is not None:
+                        # Same "small wraps the link itself" case as in_li
+                        # above -- isolate the label rather than swallowing
+                        # trailing body prose nested in the same <small>.
+                        p_source = get_source_for_link(link)
+                    else:
+                        p_source = child.get_text(" ", strip=True)
                 if _child_precedes_link(child):
                     break
             if not p_source:
@@ -2021,6 +2149,15 @@ def get_news_items(block):
                 _p = getattr(_p, "parent", None)
             if _rv:
                 source = _rv
+        # The "link immediately followed by a colon" heuristic above only
+        # means to mark a *self-labeling* anchor (no separate source small
+        # precedes it, e.g. "<a>POPE LEO XIV</a>: ..."). When a distinct
+        # source label WAS found (e.g. "VIA" before "<a>Frank Rega</a>:
+        # Venerable Pius XII..."), that trailing colon was just body
+        # punctuation introducing the excerpt, not part of the title --
+        # strip it back off so it doesn't render as "Frank Rega:".
+        if source and link_text.endswith(":"):
+            link_text = link_text[:-1]
         excerpts      = get_following_excerpts(link, _ladder_text=_block_ladder,
                                                   _current_url=url, _consumed=seen)
         feature_items = get_following_features(link, soup, doc_order=_doc_order,
