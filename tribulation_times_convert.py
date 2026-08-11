@@ -271,7 +271,7 @@ def get_scripture(block):
 # multi-word titles so "POPE" still matches "POPE LEO XIV".
 QUOTE_TITLES = (
     "POPE", "SAINT", "ST.", "BLESSED", "VENERABLE", "SERVANT OF GOD",
-    "CARDINAL", "ARCHBISHOP", "BISHOP", "FATHER", "FR.", "MONSIGNOR", "MSGR.",
+    "CARDINAL", "CARD.", "ARCHBISHOP", "BISHOP", "FATHER", "FR.", "MONSIGNOR", "MSGR.",
     "SISTER", "MOTHER", "DEACON", "ABBOT", "POPE EMERITUS",
 )
 
@@ -307,6 +307,19 @@ def get_collect(block):
             continue
         href = a.get("href", "")
         label = a.get_text(strip=True)
+        # A leading label word before the link inside the same bold span
+        # (e.g. <span>EXCERPT<a>HOMILY CARD. JOSEPH RATZINGER</a></span>)
+        # belongs on the label, not the quote body.
+        prefix_parts = []
+        for sib in span.contents:
+            if sib is a:
+                break
+            if isinstance(sib, NavigableString):
+                t = str(sib).strip()
+                if t:
+                    prefix_parts.append(t)
+        if prefix_parts:
+            label = " ".join(prefix_parts + [label])
         if not label or len(label) > 40:
             continue
         # Pattern 1: skip_url href (tweet-linked collect)
@@ -347,6 +360,22 @@ def get_collect(block):
                     break
                 parts.append(t)
         text = " ".join(parts).strip()
+        if not text:
+            # Some raw HTML shapes put the label and the quote body in two
+            # sibling <span> elements within the same <small> instead of one
+            # shared span (e.g. <small><span>EXCERPT<a>Title</a></span>
+            # <span>body text...</span></small>) -- fall back to the label
+            # span's siblings within <small> so the body isn't lost.
+            for sib in span.next_siblings:
+                if isinstance(sib, NavigableString):
+                    t = str(sib).strip(" :\n\xa0")
+                    if t:
+                        parts.append(t)
+                elif hasattr(sib, "get_text"):
+                    t = sib.get_text(" ", strip=True).strip(" :\n\xa0")
+                    if t:
+                        parts.append(t)
+            text = " ".join(parts).strip()
         if len(text) > 20:
             # Honorific pull-quotes (BISHOP/CARDINAL/POPE...) must actually quote
             # something — guards against a normal "BISHOP: Headline" link being
@@ -2016,6 +2045,19 @@ def get_news_items(block):
                 if (_after_t.startswith('\u201c') or '"' in _after_t[:5]
                         or (_after_t.startswith(':') and _has_quote)):
                     continue  # this is a collect/quote block, not a news item
+            elif _after is None:
+                # The label <a> may be the last child of its own wrapping
+                # bold <span>, with the quote body starting in a *sibling*
+                # span instead of continuing inline (e.g. <small><span>
+                # EXCERPT<a>...</a></span><span>(2005): "..."</span></small>).
+                # Mirrors get_collect's own sibling-span fallback.
+                _span_anc = link.find_parent("span", style=lambda s: s and "font-weight" in (s or ""))
+                _sib = _span_anc.next_sibling if _span_anc is not None else None
+                if _sib is not None:
+                    _sib_t = (_sib.get_text(" ", strip=True) if hasattr(_sib, "get_text")
+                              else str(_sib).strip())
+                    if '"' in _sib_t or '\u201c' in _sib_t:
+                        continue  # quote body lives in a sibling span \u2014 handled by get_collect
         # Merge consecutive same-URL <a> tags into one link_text.
         # SeaMonkey splits italic titles across multiple <a> tags with identical href.
         # These may appear as direct siblings OR as parent-level siblings.
