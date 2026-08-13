@@ -1420,16 +1420,48 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                 elif name == "p":
                     # Stop if the <p> contains a news link (it's a news item like UNIVERSALIS)
                     inner_a = nxt.find("a", href=True)
+                    _absorbed_inline = False
                     if inner_a:
                         ia_href = inner_a.get("href", "")
                         if ia_href and not skip_url(ia_href) and inner_a.get_text(strip=True):
-                            return True  # next news item — stop
-                    # Split on internal <br><br> so a bold-italic subheading
-                    # or an indented block-quote embedded mid-paragraph keeps
-                    # its own styling instead of being flattened by get_text().
-                    for _frag in _p_subheading_fragments(nxt):
-                        _fresh_para[0] = True  # each fragment is its own paragraph
-                        add(_frag)  # add() filters stop phrases
+                            # A link heading this <p> (or preceded only by a
+                            # short ALL-CAPS label, e.g. "MORE: <a>...") is a
+                            # new item's headline -- stop. But if real
+                            # sentence prose precedes the link WITHIN this
+                            # same <p> (e.g. "And, if you can, <a>please
+                            # give...</a> 100% of your gift..."), the link is
+                            # embedded inline in a sentence that continues
+                            # the CURRENT item's narrative, not a new
+                            # headline -- absorb the whole paragraph (link
+                            # kept clickable) as more of this item's prose
+                            # instead of stopping and losing the lead-in.
+                            _leading = ""
+                            for _c in nxt.children:
+                                if _c is inner_a or (hasattr(_c, "descendants")
+                                        and any(d is inner_a for d in _c.descendants)):
+                                    break
+                                _leading += (str(_c) if isinstance(_c, NavigableString)
+                                             else _c.get_text(" ", strip=True))
+                            _leading = _leading.strip()
+                            _looks_like_label = (_leading and len(_leading) < 40
+                                    and _leading == _leading.upper()
+                                    and any(ch.isalpha() for ch in _leading))
+                            if not _leading or _looks_like_label:
+                                return True  # next news item — stop
+                            _inline_ids_here = {id(a) for a in nxt.find_all("a", href=True)}
+                            _fresh_para[0] = True
+                            add(_flatten_for_cluster(nxt, _inline_ids_here, C["link"]))
+                            if _consumed is not None:
+                                for _a_in_p in nxt.find_all("a", href=True):
+                                    _consumed.add((_a_in_p.get("href") or "").strip())
+                            _absorbed_inline = True
+                    if not _absorbed_inline:
+                        # Split on internal <br><br> so a bold-italic subheading
+                        # or an indented block-quote embedded mid-paragraph keeps
+                        # its own styling instead of being flattened by get_text().
+                        for _frag in _p_subheading_fragments(nxt):
+                            _fresh_para[0] = True  # each fragment is its own paragraph
+                            add(_frag)  # add() filters stop phrases
                 elif name in ("ul", "ol"):
                     # A bullet/feature list is owned and rendered entirely by
                     # get_following_features. Previously this case fell
@@ -1743,11 +1775,44 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                     # the next <ul>, duplicating each one's
                                     # full text into every preceding item.
                                     _inner_a = n.find("a", href=True)
+                                    _absorbed_inline2 = False
                                     if _inner_a:
                                         _ia_href = _inner_a.get("href", "")
                                         if (_ia_href and not skip_url(_ia_href)
                                                 and _inner_a.get_text(strip=True)):
-                                            break  # next news item — stop
+                                            # As with the Level-1 walker's own <p>
+                                            # handling above: a link heading this
+                                            # <p> is a new item's headline — stop.
+                                            # But if real sentence prose precedes
+                                            # the link WITHIN this same <p> (e.g.
+                                            # "And, if you can, <a>please
+                                            # give...</a> 100%..."), it's inline
+                                            # continuation prose of the CURRENT
+                                            # item — absorb it (link kept
+                                            # clickable) instead of stopping.
+                                            _leading2 = ""
+                                            for _c2 in n.children:
+                                                if _c2 is _inner_a or (hasattr(_c2, "descendants")
+                                                        and any(d is _inner_a for d in _c2.descendants)):
+                                                    break
+                                                _leading2 += (str(_c2) if isinstance(_c2, NavigableString)
+                                                              else _c2.get_text(" ", strip=True))
+                                            _leading2 = _leading2.strip()
+                                            _looks_like_label2 = (_leading2 and len(_leading2) < 40
+                                                    and _leading2 == _leading2.upper()
+                                                    and any(ch.isalpha() for ch in _leading2))
+                                            if not _leading2 or _looks_like_label2:
+                                                break  # next news item — stop
+                                            _inline_ids_here2 = {id(a) for a in n.find_all("a", href=True)}
+                                            _fresh_para[0] = True
+                                            add(_flatten_for_cluster(n, _inline_ids_here2, C["link"]))
+                                            if _consumed is not None:
+                                                for _a_in_p2 in n.find_all("a", href=True):
+                                                    _consumed.add((_a_in_p2.get("href") or "").strip())
+                                            _absorbed_inline2 = True
+                                    if _absorbed_inline2:
+                                        n = getattr(n, "next_sibling", None)
+                                        continue
                                     # A <p> that introduces a following bullet
                                     # list (e.g. "...projected timelines:")
                                     # is that list's heading label, which
