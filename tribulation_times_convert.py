@@ -120,6 +120,16 @@ def is_domain_only(text):
     return bool(re.match(r'^[A-Z0-9.\-]+\.(COM|ORG|NET|INFO|GOV|EDU)$', text.strip()))
 
 
+def esc_href(url):
+    """Re-escape a decoded href value for safe embedding in an href="..."
+    attribute. BeautifulSoup automatically decodes entities when reading
+    an anchor's href (e.g. "...&amp;utm_medium=..." in news.html becomes a
+    literal "&" in Python), so every scraped URL must have "&" re-escaped
+    to "&amp;" before it's written back out, or the generated HTML is
+    invalid (see bible_link(), which does the same for BIBLE_YEAR_URL)."""
+    return (url or "").replace("&", "&amp;")
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # ENTRY EXTRACTION
 # ══════════════════════════════════════════════════════════════════════════
@@ -799,7 +809,7 @@ def _li_html(li, link_color):
             href = (node.get("href") or "").strip()
             text = node.get_text(strip=False)
             if href and text and not skip_url(href):
-                return (f'<a href="{href}" target="_blank" '
+                return (f'<a href="{esc_href(href)}" target="_blank" '
                         f'style="color:{link_color};text-decoration:none;">'
                         f'{text}</a>')
             return node.get_text(strip=False)
@@ -1400,7 +1410,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                         # dropping it or letting it surface later as a
                         # phantom separate item.
                         _txt = nxt.get_text(strip=False)
-                        add(f'<a href="{a_href}" target="_blank" '
+                        add(f'<a href="{esc_href(a_href)}" target="_blank" '
                             f'style="color:{C["link"]};font-weight:bold;">{_txt}</a>')
                         if _consumed is not None:
                             _consumed.add(a_href)
@@ -1587,7 +1597,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                         # letting it surface later as a
                                         # phantom separate item.
                                         _txt = n.get_text(strip=False)
-                                        add(f'<a href="{a_href}" target="_blank" '
+                                        add(f'<a href="{esc_href(a_href)}" target="_blank" '
                                             f'style="color:{C["link"]};font-weight:bold;">{_txt}</a>')
                                         if _consumed is not None:
                                             _consumed.add(a_href)
@@ -2157,7 +2167,17 @@ def get_news_items(block):
                 if _child_precedes_link(child):
                     break
             if not p_source:
-                continue  # no source in <p> → skip
+                # No <small> source label in this <p> -- but if the link sits
+                # inline after real prose earlier in the SAME paragraph (e.g.
+                # "And, if you can, <a>please give...</a> 100% of your
+                # gift..."), that leading prose still needs to reach the page
+                # (see _capture_leading_turns below) instead of the whole
+                # link being silently dropped. Only skip when there's
+                # genuinely nothing -- no label AND no leading prose -- which
+                # means this is boilerplate/pure-bullet content.
+                _lf_probe, _li_probe = _capture_leading_turns(link)
+                if not (_lf_probe or _li_probe):
+                    continue  # no source and no leading prose in <p> → skip
 
         seen.add(url)
 
@@ -2315,7 +2335,7 @@ def get_news_items(block):
         if _leading_fragments or _lead_in:
             if _lead_in:
                 _anchor_html = link.get_text(strip=False)
-                _lead_para = (f'{_lead_in} <a href="{url}" target="_blank" '
+                _lead_para = (f'{_lead_in} <a href="{esc_href(url)}" target="_blank" '
                               f'style="color:{C["link"]};font-weight:bold;">{_anchor_html}</a>')
                 excerpts = _leading_fragments + [_lead_para] + excerpts
                 # The link now flows inline inside that leading paragraph
@@ -2349,7 +2369,7 @@ def get_news_items(block):
             if it.get("url"):
                 link_text = it.get("link_text") or it["url"]
                 donate_frag.append(
-                    f'<a href="{it["url"]}" target="_blank" '
+                    f'<a href="{esc_href(it["url"])}" target="_blank" '
                     f'style="color:{C["link"]};font-weight:bold;">{link_text}</a>')
             donate_frag.extend(it.get("excerpts") or [])
             prev["excerpts"] = list(prev.get("excerpts") or []) + donate_frag
@@ -2496,16 +2516,21 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
             f'<div style="font-family:Verdana,Arial,sans-serif;font-size:10px;'
             f'font-weight:bold;letter-spacing:2px;text-transform:uppercase;'
             f'color:{C["crimson"]};margin-bottom:4px;">'
-            f'<a href="{url}" target="_blank" style="color:{C["crimson"]};'
+            f'<a href="{esc_href(url)}" target="_blank" style="color:{C["crimson"]};'
             f'text-decoration:none;">{source}</a></div>'
         )
         head_html = ""
-    elif source and not (link_text or "").strip() and not url:
-        # Prose-only card: source label followed directly by body content.
-        # Used for cluster primaries (e.g. St. Augustine multi-link quote,
-        # Archbishop Sheen with parenthetical citation) where the body is
-        # one flowing paragraph with inline anchor references, not a
-        # separate blue-link title above a text block.
+    elif not (link_text or "").strip() and not url:
+        # Prose-only card: optional source label followed directly by body
+        # content, with no separate blue-link title. Used for cluster
+        # primaries (e.g. St. Augustine multi-link quote, Archbishop Sheen
+        # with parenthetical citation) where the body is one flowing
+        # paragraph with inline anchor references, AND for lead-in
+        # paragraphs with no source label at all, where the only link is
+        # already woven inline into the excerpt text by
+        # _capture_leading_turns (e.g. "And, if you can, <a>please
+        # give...</a> 100%..."). h_label("") safely returns "" when there's
+        # no source, so this never renders a broken empty-href headline.
         label_html = h_label(source)
         head_html = ""
     else:
@@ -2513,7 +2538,7 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
         head_html = (
             f'<div style="font-family:Verdana,Arial,sans-serif;font-size:15px;'
             f'font-weight:bold;line-height:1.4;">'
-            f'<a href="{url}" target="_blank" style="color:{C["link"]};'
+            f'<a href="{esc_href(url)}" target="_blank" style="color:{C["link"]};'
             f'text-decoration:none;">{link_text}</a></div>'
         )
 
@@ -2593,7 +2618,7 @@ def h_feast_inline(feast):
     if not feast:
         return ""
     if feast["url"]:
-        name = (f'<a href="{feast["url"]}" target="_blank" '
+        name = (f'<a href="{esc_href(feast["url"])}" target="_blank" '
                 f'style="color:{C["link"]};text-decoration:underline;">'
                 f'{feast["link_text"]}</a>')
     else:
@@ -2632,7 +2657,7 @@ def h_headlines(heading, links):
         rows += (
             f'<div style="font-family:Verdana,Arial,sans-serif;font-size:14px;'
             f'font-weight:bold;line-height:1.5;padding:5px 0;{border}">'
-            f'<a href="{u}" target="_blank" style="color:{C["link"]};'
+            f'<a href="{esc_href(u)}" target="_blank" style="color:{C["link"]};'
             f'text-decoration:none;">{t}</a></div>'
         )
     return (
@@ -2754,7 +2779,7 @@ def _flatten_for_cluster(node, inline_ids, link_color):
             href = (node.get("href") or "").strip()
             text = node.get_text(strip=False)
             if href and text:
-                return (f'<a href="{href}" target="_blank" '
+                return (f'<a href="{esc_href(href)}" target="_blank" '
                         f'style="color:{link_color};font-weight:bold;">'
                         f'{text}</a>')
             return text
@@ -2779,7 +2804,7 @@ def _capture_cluster_excerpt(primary_a, inline_ids, link_color):
     _pheref = (primary_a.get("href") or "").strip()
     _ptext = primary_a.get_text(strip=False)
     if _pheref and _ptext:
-        _pref = (f'<a href="{_pheref}" target="_blank" '
+        _pref = (f'<a href="{esc_href(_pheref)}" target="_blank" '
                  f'style="color:{link_color};font-weight:bold;">{_ptext}</a>')
 
     fragments = []
@@ -2829,7 +2854,7 @@ def _capture_cluster_excerpt(primary_a, inline_ids, link_color):
                         text = node.get_text(strip=False)
                         if href and text:
                             current.append(
-                                f'<a href="{href}" target="_blank" '
+                                f'<a href="{esc_href(href)}" target="_blank" '
                                 f'style="color:{link_color};font-weight:bold;">'
                                 f'{text}</a>')
                         node = node.next_sibling
@@ -3049,7 +3074,7 @@ def build_entry_html(entry, include_header=True):
 padding:12px 16px;margin-bottom:22px;">
 <div style="font-family:Verdana,Arial,sans-serif;font-size:10px;font-weight:bold;
 letter-spacing:2px;text-transform:uppercase;color:{C['crimson']};margin-bottom:6px;">
-<a href="{collect_url}" target="_blank" style="color:{C['crimson']};text-decoration:none;">{collect_label}</a>
+<a href="{esc_href(collect_url)}" target="_blank" style="color:{C['crimson']};text-decoration:none;">{collect_label}</a>
 </div>
 <p style="font-family:Verdana,Arial,sans-serif;font-size:13px;font-weight:bold;
 color:{C['ink_mid']};margin:0;line-height:1.6;">{collect_text}</p>
@@ -3067,7 +3092,7 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{collect_text}</p>
 padding:12px 16px;margin-bottom:22px;">
 <div style="font-family:Verdana,Arial,sans-serif;font-size:10px;font-weight:bold;
 letter-spacing:2px;text-transform:uppercase;color:{C['crimson']};margin-bottom:6px;">
-<a href="{sr_url}" target="_blank" style="color:{C['crimson']};text-decoration:none;">{sr_label}</a>
+<a href="{esc_href(sr_url)}" target="_blank" style="color:{C['crimson']};text-decoration:none;">{sr_label}</a>
 </div>
 <p style="font-family:Verdana,Arial,sans-serif;font-size:13px;font-weight:bold;
 color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
@@ -3082,7 +3107,7 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
             f'<div style="font-family:Verdana,Arial,sans-serif;font-size:10px;'
             f'font-weight:bold;letter-spacing:2px;text-transform:uppercase;'
             f'color:{C["crimson"]};margin-bottom:4px;">'
-            f'<a href="{sr_url}" target="_blank" style="color:{C["crimson"]};'
+            f'<a href="{esc_href(sr_url)}" target="_blank" style="color:{C["crimson"]};'
             f'text-decoration:none;">{sr_label}</a></div>'
             f'<p style="font-family:Verdana,Arial,sans-serif;font-size:15px;'
             f'color:{C["ink_mid"]};line-height:1.7;margin:6px 0 0 0;">{sr_text}</p>'
