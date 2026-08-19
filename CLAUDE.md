@@ -60,6 +60,8 @@ Use judgment about what counts as "obvious":
 - Fix: plain misspellings of ordinary/common words (`CHURH` → `CHURCH`, `recieve` → `receive`).
 - Don't "fix": archaic or period-accurate spelling in quoted historical/devotional text (e.g. the weekly Ladder of Divine Ascent excerpt, which is a translated centuries-old text and may contain unusual wording that looks off but is faithful to the source translation), direct quotations, proper nouns, foreign names, or anything you're not confident is actually a typo rather than the source's intended wording. When in doubt, ask rather than silently "correcting" someone's words.
 
+Whenever comparing `news.html` against `news4.html` (e.g. verifying a converter run or reviewing a day's diff), always call out any spelling or gross grammatical errors you notice in `news.html`'s prose — not just source labels/headlines — even if fixing them isn't otherwise in scope for the task at hand. Report them to the user rather than silently fixing or silently ignoring them, so the same "don't fix quoted/archaic text" judgment above can be applied before any change is made.
+
 ## Output files
 
 - `news4.html` — generated daily page; this is what gets uploaded to the live site as the new `news.html`.

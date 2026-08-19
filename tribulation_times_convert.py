@@ -1112,6 +1112,7 @@ def _p_subheading_fragments(p_tag, label_marker=None):
     """
     style = (p_tag.get("style") or "").replace(" ", "")
     ml_m = re.search(r'margin-left:(\d+)px', style)
+    p_is_bold = "font-weight:bold" in style
 
     segments, current, br_run = [], [], 0
     for child in p_tag.children:
@@ -1136,8 +1137,24 @@ def _p_subheading_fragments(p_tag, label_marker=None):
             sp = sm.find("span", style=True)
             sst = (sp.get("style") or "").replace(" ", "") if sp else ""
             label = " ".join(sm.get_text(" ", strip=True).split())
-            if ("font-weight:bold" in sst and label and len(label) <= 80
-                    and '"' not in label and '“' not in label):
+            # A <small> subheading label is usually styled via an inner
+            # <span style="font-weight:bold;...">, but some raw HTML puts
+            # that same bold(+italic) styling on the enclosing <p> instead
+            # and leaves the <small> bare (e.g. <p style="font-weight:
+            # bold;font-style:italic;"><small>Welcomed "among his
+            # people"</small></p>). Trust that shape too, and skip the
+            # quote-mark exclusion for it: the span-styled quote check
+            # exists to avoid mistaking an inline quoted sentence for a
+            # heading, but a whole dedicated <p> styled bold+italic with
+            # nothing but a short label in it (no link) is an unambiguous
+            # section subheading even when its own title quotes someone's
+            # words.
+            plain_small_heading = (p_is_bold and not sp and label
+                                    and len(label) <= 80
+                                    and sm.find("a", href=True) is None)
+            if (("font-weight:bold" in sst and label and len(label) <= 80
+                    and '"' not in label and '“' not in label)
+                    or plain_small_heading):
                 if label_marker is not None:
                     fragments.append(f'{label_marker}{label}')
                 else:
