@@ -1028,6 +1028,56 @@ def get_following_features(link, soup, doc_order=None, inline_ids=None):
     return feature_items
 
 
+def _compute_feature_owned_li_ids(soup, doc_order, inline_ids):
+    """Predict which <li> anchors get_following_features will fold into a
+    PRECEDING link's feature list (e.g. a "RELATED HEADLINES" list where
+    each <li> carries its own source label), by mirroring that function's
+    own Level 1 (immediate sibling) / Level 2 (nearest preceding non-<li>
+    link) ownership rules exactly.
+
+    The main get_news_items loop uses this to skip those same <li> anchors
+    instead of ALSO emitting them as independent top-level items — without
+    it, such a list renders once nested under its owning card (via
+    feature_items) and once more as duplicate standalone cards.
+    """
+    owned_ids = set()
+    non_li_links = [a for a in soup.find_all("a", href=True)
+                     if not a.find_parent("li") and id(a) not in inline_ids]
+
+    level1_claimed = set()
+    for link in non_li_links:
+        nxt = link.next_sibling
+        for _ in range(8):
+            if nxt is None:
+                break
+            if hasattr(nxt, "name"):
+                if nxt.name in ("ul", "ol"):
+                    for li in nxt.find_all("li"):
+                        for a in li.find_all("a", href=True):
+                            owned_ids.add(id(a))
+                    level1_claimed.add(id(nxt))
+                    break
+                elif nxt.name == "small":
+                    break
+            nxt = getattr(nxt, "next_sibling", None)
+
+    for list_tag in soup.find_all(["ul", "ol"]):
+        if id(list_tag) in level1_claimed:
+            continue
+        l_idx = doc_order.get(id(list_tag), -1)
+        owner, best = None, -1
+        for a in non_li_links:
+            a_idx = doc_order.get(id(a), -1)
+            if 0 <= a_idx < l_idx and a_idx > best:
+                best, owner = a_idx, a
+        if owner is not None:
+            for li in list_tag.find_all("li"):
+                for a in li.find_all("a", href=True):
+                    owned_ids.add(id(a))
+
+    return owned_ids
+
+
 def _looks_like_new_item_anchor(a, current_url=""):
     """True if this <a> looks like the start of a distinct new item — it
     carries (or is itself) a source label — rather than an inline
@@ -2064,6 +2114,13 @@ def get_news_items(block):
     # continuous paragraph with clickable inline references.
     _cluster_primary_ids = {id(pa) for pa in _cluster_of.values()}
 
+    # Pre-scan: <li> anchors that get_following_features will already fold
+    # into a PRECEDING link's feature list (e.g. a "RELATED HEADLINES" list
+    # whose <li>s each carry their own source label). These must be skipped
+    # below rather than also emitted as independent items, or the same
+    # headline renders twice — once nested, once as a duplicate card.
+    _feature_owned_li_ids = _compute_feature_owned_li_ids(soup, _doc_order, _inline_a_ids)
+
     for link in soup.find_all("a", href=True):
         url = link.get("href", "").strip()
         if not url or skip_url(url):
@@ -2212,6 +2269,10 @@ def get_news_items(block):
             return hasattr(child, "descendants") and any(d is link for d in child.descendants)
 
         in_li = link.find_parent("li")
+        if in_li and id(link) in _feature_owned_li_ids:
+            # Already captured as a feature_items entry under its owning
+            # card (see _compute_feature_owned_li_ids) — don't duplicate it.
+            continue
         if in_li:
             # Check if this <li> has a source label (<small> before the link)
             li_source = ""
