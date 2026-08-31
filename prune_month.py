@@ -112,6 +112,372 @@ EMPTY_CELL_PATTERNS = [
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# LADDER-QUOTE HELPERS   (used by --refresh-template)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_LADDER_STEP_RE = re.compile(
+    # "Step N" — accepts any digit count
+    r'Step\s*(\d+)\s*'
+    # optional separator: ASCII hyphen, en-dash, em-dash, or their HTML
+    # entities, OR a colon (the modern tribtimes format uses "Step 9: …")
+    r'(?:[-\u2013\u2014:]|&[mn]dash;)?\s*'
+    # opening quote: straight, curly-left, or HTML entities (&quot;, &ldquo;)
+    r'(?:["\u201c\u201f]|&(?:quot|ldquo);)\s*'
+    # title text — anything up to the closing quote (stopping at newlines
+    # so we don't run away if the closing quote is malformed)
+    r'([^"\u201c\u201d\u201f\r\n<]{3,120}?)'
+    # closing quote: straight, curly-right, or HTML entities (&quot;, &rdquo;)
+    r'\s*(?:["\u201d\u201f]|&(?:quot|rdquo);)'
+)
+# Quote regexes for both known archive formats.
+# KompoZer format (catholicprophecy.info archives, template.html):
+#   <font style="font-family: Verdana;" face="Verdana">N. text …</font>
+# The face="Verdana" attribute is inconsistent across entries — some have
+# it, some don't — so we only require the Verdana font-family style.
+_LADDER_QUOTE_RE_KOMPOZER = re.compile(
+    r'<font[^>]*style="[^"]*Verdana[^"]*"[^>]*>\s*(\d{1,3})\.\s+(.*?)</font>',
+    re.DOTALL)
+# Modern tribtimes.com format (news2.html, script-generated archives):
+#   <p style="...font-style:italic;...color:#3d2b0d;...">N. text …</p>
+# Identified by the italic + brown-ink combination that no other <p> in
+# the file uses.
+_LADDER_QUOTE_RE_MODERN = re.compile(
+    r'<p[^>]*style="[^"]*font-style:italic[^"]*color:#3d2b0d[^"]*"[^>]*>'
+    r'\s*(\d{1,3})\.\s+(.*?)</p>',
+    re.DOTALL)
+_LADDER_QUOTE_PATTERNS = (_LADDER_QUOTE_RE_KOMPOZER, _LADDER_QUOTE_RE_MODERN)
+
+
+def _parse_ladder_quotes(html):
+    """Extract Ladder quotes with their Step context in document order.
+    Returns list of dicts:
+      {step_num, step_title, quote_num, quote_text, snippet}
+    where quote_text is plain-text (HTML tags stripped) with the source's
+    own word-wrapping preserved — these archives are hand-maintained and
+    wrap each quote across several short lines separated by blank lines,
+    and the template should keep that same look rather than flattening
+    the quote to one long line. `snippet` is a single-line, whitespace-
+    collapsed preview for console/log output only.
+
+    A "quote" is a <font face=\"Verdana\">N. …</font> tag, and it inherits
+    the most-recently-seen \"Step N — Title\" header preceding it."""
+    events = []
+    for m in _LADDER_STEP_RE.finditer(html):
+        events.append((m.start(), 'step', int(m.group(1)), m.group(2)))
+    for pattern in _LADDER_QUOTE_PATTERNS:
+        for m in pattern.finditer(html):
+            events.append((m.start(), 'quote', int(m.group(1)), m.group(2)))
+    events.sort(key=lambda x: x[0])
+
+    current_step_num = None
+    current_step_title = None
+    out = []
+    for evt in events:
+        if evt[1] == 'step':
+            current_step_num = evt[2]
+            current_step_title = evt[3]
+            continue
+        if current_step_num is None:
+            continue  # quote before any Step header — skip
+        _, _, qnum, qraw = evt
+        # Strip HTML tags only — keep the source's internal line breaks
+        # (its word-wrap) intact; just trim the leading/trailing
+        # whitespace the tag-stripping and the </font> boundary leave.
+        tags_stripped = re.sub(r'<[^>]+>', ' ', qraw)
+        wrapped_text = tags_stripped.strip()
+        collapsed_text = re.sub(r'\s+', ' ', tags_stripped).strip()
+        out.append({
+            'step_num':   current_step_num,
+            'step_title': current_step_title,
+            'quote_num':  qnum,
+            'quote_text': wrapped_text,
+            'snippet':    collapsed_text[:80],
+        })
+    return out
+
+
+def _get_last_ladder_used(archive_html):
+    """Return (step_num, quote_num) for the MOST RECENT Ladder quote used in
+    a monthly archive. In these archives new entries are at the top, so the
+    quote whose <font> tag appears FIRST in the document is the latest
+    posted — which for Ladder-continuation purposes is also the highest
+    (step, quote) pair in reading order."""
+    quotes = _parse_ladder_quotes(archive_html)
+    if not quotes:
+        return None, None
+    q = quotes[0]
+    return q['step_num'], q['quote_num']
+
+
+def _get_next_ladder_quotes(source_html, after_step, after_num, count):
+    """Get the next `count` Ladder quotes from `source_html` that come
+    AFTER (after_step, after_num) in reading order — (step ascending,
+    then quote_num ascending). Returns list ORDERED FOR TEMPLATE display,
+    i.e. top-to-bottom = latest to earliest posting, which is the reverse
+    of reading order.
+
+    Handles the common case where a source file contains many overlapping
+    quotes (an archive of a whole month): dedup by (step, num), keep the
+    first occurrence in doc order (which is the most-recently-authored
+    copy), then sort by reading order for continuation.
+    """
+    seen = set()
+    unique = []
+    for q in _parse_ladder_quotes(source_html):
+        key = (q['step_num'], q['quote_num'])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(q)
+    # Sort by reading order
+    unique.sort(key=lambda q: (q['step_num'], q['quote_num']))
+    # Filter to quotes AFTER the last used
+    after = [q for q in unique if
+             q['step_num'] > after_step
+             or (q['step_num'] == after_step and q['quote_num'] > after_num)]
+    if len(after) < count:
+        return after  # caller will error-check
+    # Take first N in reading order, then reverse for template display
+    return list(reversed(after[:count]))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEMPLATE-REFRESH LOGIC   (--refresh-template)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Date span pattern in template — KompoZer's underlined-date convention.
+# Matches e.g. "August 12, 2026", "September 3, 2026", etc.
+_TEMPLATE_DATE_RE = re.compile(
+    r'(<span style="text-decoration: underline; font-family: Verdana;">)'
+    r'([A-Z][a-z]+(?:\s+\d+,\s+\d{4})?)'  # month, optionally with " N, YYYY"
+    r'(</span>)')
+
+# Month-name normalisation
+_MONTH_NAMES = ("January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December")
+
+
+def _detect_archive_file(year, month, folder):
+    """Look for the archive file for this month in `folder`. Returns Path
+    or None. Uses the same naming convention as the archive-table links
+    (janYY.html, ..., julyYY.html, augustYY.html, etc.)."""
+    prefix, _ = MONTHS[month]
+    yy = f"{year % 100:02d}"
+    p = folder / f"{prefix}{yy}.html"
+    return p if p.exists() else None
+
+
+def refresh_template(target_year, target_month, folder,
+                     source_paths=None, skip_confirm=False, dry_run=False):
+    """Refresh template.html for the month AFTER target month.
+
+    Steps:
+      1. Find template.html, count standing entries by their date spans
+      2. Find prev-month archive (e.g. august26.html for 2026-08)
+      3. Prompt for one or more Ladder-source files (or use --ladder-source)
+      4. Read all files; parse and combine Ladder quotes in reading order;
+         if the FIRST source runs short of the needed count, prompt for
+         another file
+      5. Overwrite each entry: date → "<Month>&nbsp; , YYYY"; Step title
+         & Ladder quote (per-entry, so a Step transition mid-template is
+         handled naturally)
+
+    Returns True if template.html was written, False otherwise.
+    """
+    template = folder / "template.html"
+    if not template.exists():
+        print(f"  template.html not found in {folder} — skipping template refresh.")
+        return False
+
+    # Next month name (Sep for Aug, Jan for Dec, etc.)
+    next_month_idx = (target_month % 12) + 1
+    next_year = target_year + (1 if target_month == 12 else 0)
+    next_month_name = _MONTH_NAMES[next_month_idx - 1]
+    print(f"\nTemplate refresh (for {next_month_name} {next_year}):")
+
+    # Prev-month archive (auto-detected by naming convention)
+    archive_path = _detect_archive_file(target_year, target_month, folder)
+    if archive_path is None:
+        prefix, _ = MONTHS[target_month]
+        yy = f"{target_year % 100:02d}"
+        print(f"  ✗ prev-month archive not found: {prefix}{yy}.html")
+        print(f"    Place {prefix}{yy}.html in this folder and re-run "
+              f"with --refresh-template.")
+        return False
+    print(f"  Prev-month archive: {archive_path.name}")
+
+    # Load prev-month archive and find last quote used
+    archive_html = archive_path.read_bytes().decode('utf-8')
+    last_step, last_num = _get_last_ladder_used(archive_html)
+    if last_step is None:
+        print(f"  ✗ No Ladder quotes found in {archive_path.name}.")
+        # Diagnostic: report what WAS found so the user can send a snippet.
+        step_hits = _LADDER_STEP_RE.findall(archive_html)
+        quote_hits = sum(len(p.findall(archive_html)) for p in _LADDER_QUOTE_PATTERNS)
+        step_raw = re.findall(r'Step\s*\d+[^<]{0,80}', archive_html)
+        print(f"    Diagnostic: 'Step N' text hits: {len(step_raw)}, "
+              f"parsed step headers: {len(step_hits)}, "
+              f"quote tags (both formats): {quote_hits}")
+        if step_raw and not step_hits:
+            print(f"    First raw 'Step' occurrence in file (title regex "
+                  f"didn't match this — likely a quote/dash character variant):")
+            print(f"      {step_raw[0][:120]!r}")
+        return False
+    print(f"  Last Ladder quote used: Step {last_step} #{last_num}")
+
+    # Load template first (we need the count for figuring out how many quotes)
+    template_html = template.read_bytes().decode('utf-8')
+    date_matches = list(_TEMPLATE_DATE_RE.finditer(template_html))
+    entry_count = len(date_matches)
+    if entry_count == 0:
+        print(f"  ✗ No standing entries found in template.html "
+              f"(no matching date spans).")
+        return False
+    print(f"  template.html: {entry_count} standing entries detected")
+
+    # Resolve initial source files
+    if not source_paths:
+        try:
+            reply = input(
+                "  Ladder source file(s) — space/comma separated for more than one\n"
+                "  (e.g. 'oct08.html' or 'oct08.html nov08.html'): "
+            ).strip()
+        except EOFError:
+            reply = ""
+        if not reply:
+            print("  ✗ No source file given — skipping template refresh.")
+            return False
+        source_paths = [folder / s.strip() for s in re.split(r'[,\s]+', reply) if s.strip()]
+
+    # Collect enough quotes across the source list; prompt for more if short
+    collected = []
+    used_sources = []
+    remaining_needed = entry_count
+    pool = list(source_paths)
+    while remaining_needed > 0:
+        if not pool:
+            # Ran out of provided files but still short — prompt for another
+            print(f"  Only {len(collected)} of {entry_count} quotes so far; "
+                  f"need {remaining_needed} more.")
+            try:
+                reply = input("  Next Ladder source file "
+                              "(or ENTER to abort): ").strip()
+            except EOFError:
+                reply = ""
+            if not reply:
+                print(f"  ✗ Aborted — need {remaining_needed} more quotes.")
+                return False
+            pool.append(folder / reply)
+
+        sp = pool.pop(0)
+        if not sp.exists():
+            print(f"  ✗ source file not found: {sp}")
+            return False
+        used_sources.append(sp)
+        src_html = sp.read_bytes().decode('utf-8')
+        # Take next N from THIS file (in reading order)
+        got = _get_next_ladder_quotes(src_html, last_step, last_num, remaining_needed)
+        # Filter out any (step, num) we've already collected
+        seen = {(q['step_num'], q['quote_num']) for q in collected}
+        # Note: got is returned reverse-of-reading-order (top→bottom = latest→earliest).
+        # Re-sort to reading order for accumulation, then re-reverse at the end.
+        got_reading_order = sorted(got, key=lambda q: (q['step_num'], q['quote_num']))
+        for q in got_reading_order:
+            key = (q['step_num'], q['quote_num'])
+            if key in seen:
+                continue
+            collected.append(q)
+            seen.add(key)
+        print(f"    {sp.name}: contributed {len(got_reading_order)} usable quotes")
+        # Advance the "last used" cursor to the highest quote we've collected
+        if collected:
+            collected.sort(key=lambda q: (q['step_num'], q['quote_num']))
+            last_of = collected[-1]
+            last_step, last_num = last_of['step_num'], last_of['quote_num']
+        remaining_needed = entry_count - len(collected)
+
+    # Order collected quotes reading-order ascending, take first N, reverse for template
+    collected.sort(key=lambda q: (q['step_num'], q['quote_num']))
+    next_quotes = list(reversed(collected[:entry_count]))
+
+    print(f"  Ladder source(s) used: {', '.join(sp.name for sp in used_sources)}")
+    print(f"  Next {entry_count} quotes for {next_month_name} template "
+          f"(top → bottom):")
+    for q in next_quotes:
+        print(f"    Step {q['step_num']} #{q['quote_num']}: {q['snippet']}")
+
+    if not skip_confirm and not dry_run:
+        try:
+            reply = input("\n  Apply these changes to template.html? [y/N] ").strip().lower()
+        except EOFError:
+            reply = ""
+        if reply not in ("y", "yes"):
+            print("  Template refresh aborted.")
+            return False
+
+    # ---- Apply edits ---------------------------------------------------
+    #
+    # Strategy: split the template into "entries" bounded by date spans.
+    # Each entry begins at its date span and ends at the next date span
+    # (or end of file). Rewrite entries LAST-to-FIRST so byte positions
+    # of earlier entries stay valid.
+    entry_starts = [m.start() for m in date_matches]
+    entry_ends = entry_starts[1:] + [len(template_html)]
+    new_html = template_html
+
+    for idx in reversed(range(entry_count)):
+        entry_html = new_html[entry_starts[idx]:entry_ends[idx]]
+        q = next_quotes[idx]
+
+        # (a) Date span → "September&nbsp; , 2026" (with a visible gap where
+        # the day number goes when you actually post that day — matches the
+        # convention used in hand-refreshed templates).
+        date_replacement = f"{next_month_name}&nbsp; , {next_year}"
+        entry_html = _TEMPLATE_DATE_RE.sub(
+            lambda m: m.group(1) + date_replacement + m.group(3),
+            entry_html, count=1)
+
+        # (b) Step title → "Step 9- \"On remembrance of wrongs\""
+        entry_html = _LADDER_STEP_RE.sub(
+            f'Step {q["step_num"]}- "{q["step_title"]}"',
+            entry_html, count=1)
+
+        # (c) Quote font tag → same wrapper, new "N. text"
+        quote_match = _LADDER_QUOTE_RE_KOMPOZER.search(entry_html)
+        if quote_match:
+            open_end = quote_match.group(0).index(">") + 1
+            open_tag = quote_match.group(0)[:open_end]
+            replacement = f'{open_tag}{q["quote_num"]}. {q["quote_text"]}</font>'
+            tail = entry_html[quote_match.end():]
+            # The Ladder source files write each verse's closing period
+            # inside the same <font> tag as the sentence, so quote_text
+            # above already ends with one. Some existing template entries
+            # instead carry that period on its own in the very next <font>
+            # tag (a relic of an earlier refresh cycle) — left alone, that
+            # would render as a doubled "..". Strip just the stray period,
+            # keeping the tag (and any trailing <br>) intact.
+            if re.search(r'[.!?]\s*$', q["quote_text"]):
+                orphan_period = re.match(r'(\s*<font[^>]*>\s*)\.', tail)
+                if orphan_period:
+                    tail = orphan_period.group(1) + tail[orphan_period.end():]
+            entry_html = entry_html[:quote_match.start()] + replacement + tail
+
+        new_html = new_html[:entry_starts[idx]] + entry_html + new_html[entry_ends[idx]:]
+
+    if dry_run:
+        print("\n  Dry-run — template.html not written.")
+        return False
+
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = template.with_name(f"template_backup_{stamp}.html")
+    shutil.copy2(template, backup)
+    print(f"\n  Backup: {backup.name}")
+    template.write_bytes(new_html.encode('utf-8'))
+    print(f"  Wrote: {template.name}")
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # ARGUMENT PARSING
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -136,6 +502,16 @@ def _parse_args():
                    help="Report what would change, without writing")
     p.add_argument("--yes", "-y", action="store_true",
                    help="Skip interactive confirmation")
+    p.add_argument("--refresh-template", action="store_true",
+                   help="After pruning news2.html, also refresh template.html "
+                        "for the following month (updates dates + Ladder quotes)")
+    p.add_argument("--no-refresh-template", action="store_true",
+                   help="Never refresh template.html (skip the prompt)")
+    p.add_argument("--ladder-source", metavar="FILE", nargs="+",
+                   help="One or more filenames in current folder containing "
+                        "the next set of Ladder quotes (e.g. oct08.html, "
+                        "or 'oct08.html nov08.html' if the first runs out). "
+                        "Only used with --refresh-template; prompts if omitted.")
     args = p.parse_args()
 
     year, month = None, None
@@ -157,7 +533,8 @@ def _parse_args():
     if not (1 <= month <= 12) or year < 2000 or year > 2100:
         raise SystemExit(f"ERROR: invalid year/month {year}-{month:02d}")
 
-    return year, month, args.dry_run, args.yes
+    return (year, month, args.dry_run, args.yes,
+            args.refresh_template, args.no_refresh_template, args.ladder_source)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -326,7 +703,8 @@ def add_archive_link(html, year, month):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    year, month, dry_run, skip_confirm = _parse_args()
+    (year, month, dry_run, skip_confirm,
+     refresh_flag, no_refresh_flag, ladder_source) = _parse_args()
     prefix, abbr = MONTHS[month]
     yy = f"{year % 100:02d}"
     label = f"{abbr} {year} ({prefix}{yy}.html)"
@@ -398,6 +776,24 @@ def main():
     print(f"Wrote: {path.name}")
 
     print(f"\n✓ Done. Preview {path.name} in your browser before uploading.")
+
+    # ---- Optional Step 3: refresh template.html for next month ----
+    should_refresh = refresh_flag
+    if not should_refresh and not no_refresh_flag:
+        try:
+            reply = input(
+                f"\nAlso refresh template.html for next month? [y/N] "
+            ).strip().lower()
+            should_refresh = reply in ("y", "yes")
+        except EOFError:
+            should_refresh = False
+    if should_refresh:
+        source_args = ([Path(s) for s in ladder_source]
+                       if ladder_source else None)
+        refresh_template(year, month, Path.cwd(),
+                         source_paths=source_args,
+                         skip_confirm=skip_confirm,
+                         dry_run=dry_run)
 
 
 if __name__ == "__main__":
