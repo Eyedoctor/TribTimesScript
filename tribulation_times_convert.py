@@ -3895,7 +3895,7 @@ def main():
     global BIBLE_YEAR_URL, BIBLE_YEAR_LABEL
     _bm = re.search(
         r'<a[^>]+href="(https?://bibleinayearonline\.com/([a-z]+)-oyb[^"]*)"[^>]*>'
-        r'\s*https?://bibleinayearonline', raw)
+        r'(?:\s*<[^>]+>)*\s*https?://bibleinayearonline', raw)
     if _bm:
         BIBLE_YEAR_URL   = _bm.group(1).replace("&amp;", "&")
         BIBLE_YEAR_LABEL = _bm.group(2).capitalize() + " Readings"
