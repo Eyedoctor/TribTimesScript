@@ -311,8 +311,19 @@ def get_collect(block):
         a = sm.find("a", href=True)
         if not a:
             continue
-        # The <a> must be inside a bold span
+        # The <a> must be inside a bold span -- OR its enclosing <p> itself
+        # carries the bold style directly (e.g. <p style="font-weight:bold">
+        # <small><a>...</a>: "quoted text"</small></p>, with no wrapping
+        # <span> at all). In that shape the <small> itself holds both the
+        # label link and the trailing quote text as direct children, so it
+        # can stand in for `span` in the rest of this function.
         span = a.find_parent("span", style=lambda s: s and "font-weight" in (s or ""))
+        if not span:
+            _p_anc = sm.find_parent("p")
+            if _p_anc is not None:
+                _p_style = (_p_anc.get("style") or "").replace(" ", "")
+                if "font-weight:bold" in _p_style:
+                    span = sm
         if not span:
             continue
         href = a.get("href", "")
@@ -357,7 +368,7 @@ def get_collect(block):
                 if (t_norm and all_caps_words and len(t_norm) <= 40
                         and '"' not in t_norm and '\u201c' not in t_norm):
                     break
-                parts.append(t)
+                parts.append(t_norm)
             elif hasattr(child, "get_text"):
                 t = child.get_text(" ", strip=True).strip(" :\n\xa0")
                 if not t:
@@ -368,7 +379,7 @@ def get_collect(block):
                 if (t_norm and all_caps_words and len(t_norm) <= 40
                         and '"' not in t_norm and '\u201c' not in t_norm):
                     break
-                parts.append(t)
+                parts.append(t_norm)
         text = " ".join(parts).strip()
         if not text:
             # Some raw HTML shapes put the label and the quote body in two
@@ -819,7 +830,7 @@ def _li_html(li, link_color):
     return " ".join("".join(_walk(c) for c in li.children).split()).strip()
 
 
-def get_following_features(link, soup, doc_order=None, inline_ids=None):
+def get_following_features(link, soup, doc_order=None, inline_ids=None, excluded_lists=None):
     """
     Collect <ul> or <ol> list items that follow a link.
     Uses document-position logic: finds every <ul>/<ol> in the block,
@@ -833,8 +844,15 @@ def get_following_features(link, soup, doc_order=None, inline_ids=None):
     actually becomes its own item) rather than to an inline member that
     never surfaces as its own item and would otherwise strand the list
     with no owner at all.
+
+    excluded_lists (if given) is a set of id(<ul>/<ol>) already claimed by
+    get_news_items' own headline-list pre-pass (a standalone section
+    heading with no link of its own, owning its list directly) — those
+    must NOT also be attributed here to whatever link happens to precede
+    them, or that source section gets merged into an unrelated card.
     """
     inline_ids = inline_ids or set()
+    excluded_lists = excluded_lists or set()
     feature_items = []
     _owner_href = (link.get("href") or "").strip()
 
@@ -845,6 +863,8 @@ def get_following_features(link, soup, doc_order=None, inline_ids=None):
             break
         if hasattr(nxt, "name"):
             if nxt.name in ("ul", "ol"):
+                if id(nxt) in excluded_lists:
+                    break
                 for li in nxt.find_all("li"):
                     lt = _li_html(li, C["link"])
                     if lt:
@@ -874,6 +894,8 @@ def get_following_features(link, soup, doc_order=None, inline_ids=None):
     # Find all lists that belong to this link (this link is the last <a> before them)
     owned_lists = []
     for list_tag in soup.find_all(["ul", "ol"]):
+        if id(list_tag) in excluded_lists:
+            continue
         l_idx = doc_order.get(id(list_tag), -1)
         last_link_before, best = None, -1
         for a in all_links:
@@ -1809,6 +1831,14 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                                             if (pk3.name == "a" and pk3.get("href")
                                                                     and pk3.get_text(strip=True)):
                                                                 has_lnk2 = True
+                                                            elif pk3.name in ("ul", "ol"):
+                                                                # Labels a following bullet/feature
+                                                                # list (e.g. "RELATED NEWS REPORTS")
+                                                                # -- leave it (and the list) to
+                                                                # get_following_features rather than
+                                                                # also emitting it here as a duplicate
+                                                                # plain-<strong> subheading.
+                                                                has_lnk2 = True
                                                             break
                                                         pk3 = getattr(pk3, "next_sibling", None)
                                                 if not has_lnk2:
@@ -1989,7 +2019,14 @@ def _capture_leading_turns(link):
     def flush():
         nonlocal cur_label, cur_parts
         text = " ".join(" ".join(cur_parts).split()).strip(" :")
-        if text or cur_label:
+        # A label with NO body text isn't a dialogue turn — it's two
+        # adjacent <small> labels forming one compound source label (e.g.
+        # "MOST REVEREND DANIEL E. THOMAS" immediately followed by
+        # "REVIEW:" before a single link). get_source_for_link already
+        # combines those into one compound label; treating the empty
+        # "turn" as real dialogue here would inject a duplicate,
+        # out-of-place label into the item's excerpts.
+        if text:
             turns.append((cur_label, text))
         cur_label, cur_parts = None, []
 
@@ -2101,6 +2138,74 @@ def get_news_items(block):
             headline_first[_links[0][0]] = {"heading": _heading, "links": _links}
             for _u, _t in _links:
                 headline_member.add(_u)
+
+    # Pre-pass (part 2): SECTION HEADINGS over a BULLETED LIST of headline
+    # links (e.g. "RELATED NEWS REPORTS" followed by a <ul> whose <li>s are
+    # each a headline <a>) — same idea as the bare-links pre-pass above, but
+    # the links live inside a <ul>/<ol> rather than as direct <br>-separated
+    # siblings of the heading. In the raw source this heading is its own
+    # standalone block (its own <span>, sibling of whatever news item
+    # precedes it) with no link of its own to head a card, so without this
+    # it gets swept up by get_following_features() as trailing content of
+    # whatever link happens to precede it in the document — merging two
+    # visually distinct source sections into one card. Render it as its own
+    # compact headline-list card instead, matching the source's own layout.
+    _headline_owned_lists = set()
+
+    def _next_list_tag(start):
+        """Walk forward past only whitespace/<br> siblings; return the
+        first <ul>/<ol> reached, or None if anything else intervenes."""
+        _n, _steps = start, 0
+        while _n is not None and _steps < 6:
+            _steps += 1
+            if isinstance(_n, NavigableString):
+                if str(_n).strip():
+                    return None
+            elif _n.name == "br":
+                pass
+            elif _n.name in ("ul", "ol"):
+                return _n
+            else:
+                return None
+            _n = _n.next_sibling
+        return None
+
+    for _sm in soup.find_all("small"):
+        if _sm.find("a", href=True):
+            continue  # label smalls with their own link are normal items
+        _sp = _sm.find("span", style=True)
+        if not _sp:
+            continue
+        _st = (_sp.get("style") or "").replace(" ", "")
+        if "font-weight:bold" not in _st:
+            continue
+        _heading = _sm.get_text(" ", strip=True).strip(" :")
+        if not _heading or len(_heading) > 60:
+            continue
+        # The heading's <small> is often the sole real content of its own
+        # wrapping <span> (e.g. "<span><small>...</small><br></span>"), in
+        # which case the <ul> is a sibling of that wrapping <span>, not of
+        # the <small> itself — check both.
+        _list_tag = _next_list_tag(_sm.next_sibling)
+        if _list_tag is None and _sm.parent is not None and _sm.parent.name == "span":
+            _list_tag = _next_list_tag(_sm.parent.next_sibling)
+        if _list_tag is None or id(_list_tag) in _headline_owned_lists:
+            continue
+        _li_links = []
+        for _li in _list_tag.find_all("li"):
+            _li_a = _li.find("a", href=True)
+            if _li_a is None:
+                continue
+            _href = _li_a.get("href", "").strip()
+            _txt  = clean(_li_a)
+            if _href and _txt and not skip_url(_href):
+                _li_links.append((_href, _txt))
+        if not _li_links or _li_links[0][0] in headline_member:
+            continue
+        headline_first[_li_links[0][0]] = {"heading": _heading, "links": _li_links}
+        for _u, _t in _li_links:
+            headline_member.add(_u)
+        _headline_owned_lists.add(id(_list_tag))
 
     # Pre-scan: identify INLINE CONTINUATION links (see helper for details).
     # These are inline references within a previous item's content — not
@@ -2278,14 +2383,15 @@ def get_news_items(block):
             li_source = ""
             for child in in_li.children:
                 if hasattr(child, 'name') and child.name == 'small':
-                    if child.find("a", href=True) is not None:
-                        # The <small> wraps the link itself (not just a label
-                        # ahead of it) -- its raw get_text() would swallow any
-                        # trailing excerpt prose nested in the same <small> as
-                        # the link. Isolate just the label instead.
-                        li_source = get_source_for_link(link)
-                    else:
-                        li_source = child.get_text(" ", strip=True)
+                    # Route through get_source_for_link rather than this
+                    # child's own get_text() -- besides isolating the label
+                    # when the <small> wraps the link itself (avoiding
+                    # swallowing trailing excerpt prose nested in the same
+                    # <small>), it also combines multiple adjacent label
+                    # <small>s into one compound label (e.g. "AUTHOR NAME
+                    # — REVIEW") instead of the last one silently
+                    # overwriting the first.
+                    li_source = get_source_for_link(link)
                 if _child_precedes_link(child):
                     break
                 if hasattr(child, 'name') and child.name == 'a' and child is not link:
@@ -2300,13 +2406,12 @@ def get_news_items(block):
             p_source = ""
             for child in in_p.children:
                 if hasattr(child, 'name') and child.name == 'small':
-                    if child.find("a", href=True) is not None:
-                        # Same "small wraps the link itself" case as in_li
-                        # above -- isolate the label rather than swallowing
-                        # trailing body prose nested in the same <small>.
-                        p_source = get_source_for_link(link)
-                    else:
-                        p_source = child.get_text(" ", strip=True)
+                    # Same reasoning as in_li above: route through
+                    # get_source_for_link so multiple adjacent label
+                    # <small>s (e.g. "MOST REVEREND DANIEL E. THOMAS"
+                    # followed by "REVIEW:") combine into one compound
+                    # label instead of the last one overwriting the first.
+                    p_source = get_source_for_link(link)
                 if _child_precedes_link(child):
                     break
             if not p_source:
@@ -2366,7 +2471,19 @@ def get_news_items(block):
         excerpts      = get_following_excerpts(link, _ladder_text=_block_ladder,
                                                   _current_url=url, _consumed=seen)
         feature_items = get_following_features(link, soup, doc_order=_doc_order,
-                                                inline_ids=_inline_a_ids)
+                                                inline_ids=_inline_a_ids,
+                                                excluded_lists=_headline_owned_lists)
+
+        # A "LABEL (<a>Name</a>): body" parenthetical attribution (e.g.
+        # "VIA X (<a>Father V</a>): In a nutshell...") leaves the matching
+        # close-paren and colon as leftover punctuation at the front of the
+        # body text -- the source-label walk only looks backward past the
+        # opening "(" without ever marking it consumed. Strip it back off.
+        _prev_sib = link.previous_sibling
+        _prev_txt = str(_prev_sib) if isinstance(_prev_sib, NavigableString) else ""
+        if (excerpts and not excerpts[0].startswith("<")
+                and _prev_txt.strip().endswith("(")):
+            excerpts[0] = re.sub(r'^\)\s*:?\s*', '', excerpts[0])
 
         # Remove excerpts that are continuation fragments already in link_text
         # Check if the excerpt text (stripped of punctuation) overlaps with link_text
@@ -2800,7 +2917,7 @@ def h_headlines(heading, links):
         rows += (
             f'<div style="font-family:Verdana,Arial,sans-serif;font-size:14px;'
             f'font-weight:bold;line-height:1.5;padding:5px 0;{border}">'
-            f'<a href="{esc_href(u)}" target="_blank" style="color:{C["link"]};'
+            f'&#10022;&nbsp;<a href="{esc_href(u)}" target="_blank" style="color:{C["link"]};'
             f'text-decoration:none;">{t}</a></div>'
         )
     return (
