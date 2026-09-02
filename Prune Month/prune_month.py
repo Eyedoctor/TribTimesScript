@@ -680,10 +680,17 @@ def add_archive_link(html, year, month):
             return html, f"other-link:{existing.group(1)}"
         return html, "already-present"
 
-    # Preserve any valign="top" attribute on the existing cell (used on
-    # the last column of the last year for visual consistency).
-    valign_match = re.search(r'valign="[^"]+"', target_cell_raw)
-    valign_attr = " " + valign_match.group(0) if valign_match else ""
+    # Preserve vertical alignment from the existing empty cell (used on
+    # the last column of the last year for visual consistency). It may
+    # carry either the legacy valign="top" HTML attribute or, after the
+    # W3C-validator cleanup in tribulation_times_convert.py converted
+    # news2.html's static chrome to CSS, its equivalent
+    # style="vertical-align:top;". Detect either and always emit the
+    # modern CSS form, so pruning never reintroduces the obsolete
+    # attribute that cleanup removed.
+    has_valign = bool(re.search(r'valign="top"', target_cell_raw)
+                       or re.search(r'vertical-align\s*:\s*top', target_cell_raw))
+    valign_attr = ' style="vertical-align:top;"' if has_valign else ""
 
     # Build the replacement cell in the exact indentation style used by
     # every other filled cell in this archive.

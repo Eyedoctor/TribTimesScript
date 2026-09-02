@@ -1,0 +1,6 @@
+Files necessary to run monthly prune_month.py
+
+news2.html
+Ladder copy month, eg. oct08.html
+Last month archive eg. august26.html
+template.html
