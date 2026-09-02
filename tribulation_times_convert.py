@@ -431,8 +431,8 @@ def get_collect(block):
 
 
 def get_social_report(block):
-    """Return (label, url, text) for an X/Twitter self-labeling bold report
-    block, or ('','','').
+    """Return (prefix, label, url, text, bold) for an X/Twitter bold report
+    block, or ('','','','',False).
 
     These are secular news posts where the bold label is itself the link to an
     x.com / twitter.com post, followed by a report body. They are not
@@ -446,7 +446,12 @@ def get_social_report(block):
          (link WRAPS the bold label; body trails after </a> up to the next <br>,
           and may itself contain an inline link, e.g. a photo)
 
-    Any inline link inside the body is preserved. Returns ('','','',False) if none.
+    `prefix` is a distinct label word before the link inside the same bold
+    span in Structure A (e.g. "VIA" in "VIA <a>X Sachin Jose</a>: ..."),
+    meant to render as plain (non-linked) text ahead of the linked label —
+    usually empty.
+
+    Any inline link inside the body is preserved. Returns ('','','','',False) if none.
     """
     soup = BeautifulSoup(block, "html.parser")
 
@@ -464,24 +469,21 @@ def get_social_report(block):
         href = a.get("href", "")
         if not ("x.com/" in href or "twitter.com/" in href):
             continue
-        # If a distinct label word precedes the link inside the same bold
-        # span (e.g. "VIA <a>X Sachin Jose</a>: ..."), the link's own text
-        # is NOT a self-label -- get_source_for_link() already finds "VIA"
-        # as this item's real source label and get_news_items() renders it
-        # as a normal card. Matching it here too would render the same
-        # item a second time as a duplicate quote box, with the "VIA"
-        # prefix wrongly swept into the body text below.
+        # A distinct label word before the link inside the same bold span
+        # (e.g. "VIA <a>X Sachin Jose</a>: ...") is a plain-text prefix, not
+        # part of the linked label -- capture it separately so the caller
+        # can render "VIA <a>X Sachin Jose</a>" instead of either dropping
+        # it or wrapping "VIA" in the link too.
         _prev_sib = a.previous_sibling
-        _has_prefix = False
+        prefix_parts = []
         while _prev_sib is not None:
             _pt = (str(_prev_sib) if isinstance(_prev_sib, NavigableString)
                    else _prev_sib.get_text(" ", strip=True))
-            if _pt.strip():
-                _has_prefix = True
-                break
+            _pt = _pt.strip()
+            if _pt:
+                prefix_parts.insert(0, _pt)
             _prev_sib = _prev_sib.previous_sibling
-        if _has_prefix:
-            continue
+        prefix = " ".join(prefix_parts)
         label = a.get_text(strip=True)
         if not label or len(label) > 40:
             continue
@@ -500,8 +502,12 @@ def get_social_report(block):
             if t:
                 parts.append(t)
         text = _norm(" ".join(parts)).strip()
+        # The prefix (if any) was captured separately above -- it must not
+        # also linger as the leading word(s) of the body text.
+        if prefix and text.startswith(prefix):
+            text = text[len(prefix):].strip(" :")
         if len(text) > 20:
-            return label, href, text, True      # body inside bold span -> bold
+            return prefix, label, href, text, True   # body inside bold span -> bold
 
     # ---- Structure B: <a> wraps the bold label; body follows after </a> ------
     for a in soup.find_all("a", href=True):
@@ -538,9 +544,9 @@ def get_social_report(block):
         text = "".join(parts).strip()
         text = text.lstrip(":").strip()
         if len(re.sub(r'<[^>]+>', '', text)) > 20:
-            return label, href, text, False     # only the label is bold -> plain body
+            return "", label, href, text, False   # only the label is bold -> plain body
 
-    return "", "", "", False
+    return "", "", "", "", False
 
 
 def get_pull_quote(block):
@@ -905,10 +911,14 @@ def get_following_features(link, soup, doc_order=None, inline_ids=None, excluded
             if nxt.name in ("ul", "ol"):
                 if id(nxt) in excluded_lists:
                     break
-                for li in nxt.find_all("li"):
+                # An <ol> in the source is a numbered list (e.g. "Twelve
+                # Quotes...") -- keep the numbering instead of flattening
+                # it to the same ✦ bullet used for <ul> feature lists.
+                ordered = nxt.name == "ol"
+                for i, li in enumerate(nxt.find_all("li"), start=1):
                     lt = _li_html(li, C["link"])
                     if lt:
-                        feature_items.append(lt)
+                        feature_items.append(f"__ORDERED__{i}__{lt}" if ordered else lt)
                 return feature_items
             elif nxt.name == "small":
                 break
@@ -1028,10 +1038,11 @@ def get_following_features(link, soup, doc_order=None, inline_ids=None, excluded
         if label_found and label_found not in existing_labels:
             existing_labels.add(label_found)
             feature_items.append(f"__LABEL__{label_found}")
-        for li in list_tag.find_all("li"):
+        ordered = list_tag.name == "ol"
+        for i, li in enumerate(list_tag.find_all("li"), start=1):
             lt = _li_html(li, C["link"])
             if lt:
-                feature_items.append(lt)
+                feature_items.append(f"__ORDERED__{i}__{lt}" if ordered else lt)
 
     # Collect text after the LAST owned list. An article can continue for
     # SEVERAL more paragraphs after its bulleted list — some plain body
@@ -2129,7 +2140,7 @@ def _capture_leading_turns(link):
     return fragments, lead_in
 
 
-def get_news_items(block):
+def get_news_items(block, _skip_urls=None):
     """
     Extract all news items from a raw entry block.
 
@@ -2139,7 +2150,13 @@ def get_news_items(block):
       link_text     — visible title
       excerpts      — following text paragraphs / <big> text
       feature_items — ✦ bullet list items from a following <ul>
+
+    _skip_urls (if given) is a set of hrefs already claimed by
+    get_social_report()'s small-bold quote box (e.g. "VIA <a>X Sachin
+    Jose</a>: ...") — those must not ALSO be rendered here as an ordinary
+    card, or the same item appears twice with two different looks.
     """
+    _skip_urls = _skip_urls or set()
     soup  = BeautifulSoup(block, "html.parser")
     _block_ladder = get_ladder(block)  # used to filter ladder text from excerpts
     # Built once per block; get_following_features uses it for list ownership.
@@ -2285,6 +2302,8 @@ def get_news_items(block):
         url = link.get("href", "").strip()
         if not url or skip_url(url):
             continue
+        if url in _skip_urls:
+            continue  # already rendered as a get_social_report() quote box
         # Skip embedded image / media links (e.g. an fbcdn photo linked inside a
         # post body). These are never news headlines; they belong to the body of
         # whatever item contains them (handled there).
@@ -2796,10 +2815,17 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
                 remaining = [f for f in feature_items[feature_items.index(item)+1:]
                              if not f.startswith("__POST_LIST__") and not f.startswith("__LABEL__")]
                 border = f"border-bottom:1px dotted {C['rule']};" if remaining else ""
+                # An <ol> source list keeps its number instead of the ✦
+                # bullet used for <ul> feature lists (see get_following_features).
+                _ord_m = re.match(r'__ORDERED__(\d+)__(.*)', item, re.DOTALL)
+                if _ord_m:
+                    marker, item_text = f'{_ord_m.group(1)}.', _ord_m.group(2)
+                else:
+                    marker, item_text = '&#10022;', item
                 rows += (
                     f'<tr><td style="padding:5px 0;{border}font-family:Verdana,Arial,sans-serif;'
                     f'font-size:14px;color:{C["ink_mid"]};line-height:1.5;">'
-                    f'&#10022;&nbsp;{item}</td></tr>\n'
+                    f'{marker}&nbsp;{item_text}</td></tr>\n'
                 )
         if in_table:
             rows += f'</tbody></table>\n'
@@ -2867,15 +2893,15 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
 
 def h_announcement(text):
     """Standalone bold administrative notice (e.g. a holiday/recess notice)
-    that precedes the day's content with no link of its own -- a centered
-    crimson banner across the top of the entry."""
+    that precedes the day's content with no link of its own. news.html
+    renders this as plain small bold text (<b><font size="-1">...), not a
+    highlighted block -- match that weight instead of a banner."""
     if not text:
         return ""
     return (
-        f'<div style="background-color:{C["crimson"]};color:#f5f0e8;'
-        f'padding:10px 16px;margin:0 0 18px 0;text-align:center;'
-        f'font-family:Verdana,Arial,sans-serif;font-size:13px;font-weight:bold;'
-        f'letter-spacing:0.5px;line-height:1.5;">{text}</div>\n'
+        f'<p style="font-family:Verdana,Arial,sans-serif;font-size:13px;'
+        f'font-weight:bold;color:{C["ink_mid"]};margin:0 0 18px 0;'
+        f'line-height:1.5;">{text}</p>\n'
     )
 
 
@@ -3417,14 +3443,15 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{collect_text}</p>
     #   body_bold=False -> ordinary news card: crimson linked label + normal body
     # Built here, then inserted at its source-order position within the news
     # stream below (the post may sit first, last, or between news items).
-    sr_label, sr_url, sr_text, sr_bold = get_social_report(block)
+    sr_prefix, sr_label, sr_url, sr_text, sr_bold = get_social_report(block)
     sr_html = ""
     if sr_text and sr_bold:
+        _sr_prefix_html = f"{sr_prefix} " if sr_prefix else ""
         sr_html = f"""<div style="background-color:{C['ladder_bg']};border-left:3px solid {C['crimson']};
 padding:12px 16px;margin-bottom:22px;">
 <div style="font-family:Verdana,Arial,sans-serif;font-size:10px;font-weight:bold;
 letter-spacing:2px;text-transform:uppercase;color:{C['crimson']};margin-bottom:6px;">
-<a href="{esc_href(sr_url)}" target="_blank" style="color:{C['crimson']};text-decoration:none;">{sr_label}</a>
+{_sr_prefix_html}<a href="{esc_href(sr_url)}" target="_blank" style="color:{C['crimson']};text-decoration:none;">{sr_label}</a>
 </div>
 <p style="font-family:Verdana,Arial,sans-serif;font-size:13px;font-weight:bold;
 color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
@@ -3464,8 +3491,11 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
     _pending.sort(key=lambda p: p[0])
     _pending_idx = 0
 
-    # News items
-    for item in get_news_items(block):
+    # News items. The social-report URL is excluded here when it rendered
+    # as its own small-bold quote box above (sr_bold) so it isn't ALSO
+    # emitted as an ordinary card.
+    _news_skip_urls = {sr_url} if (sr_text and sr_bold and sr_url) else None
+    for item in get_news_items(block, _skip_urls=_news_skip_urls):
         # Insert any collect/social block(s) before the first news item that
         # follows them in the source, in their own relative source order.
         _ipos = _src_pos(item.get("url", ""))
