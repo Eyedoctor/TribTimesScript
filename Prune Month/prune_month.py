@@ -255,10 +255,17 @@ def _get_next_ladder_quotes(source_html, after_step, after_num, count):
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Date span pattern in template — KompoZer's underlined-date convention.
-# Matches e.g. "August 12, 2026", "September 3, 2026", etc.
+# Matches three shapes:
+#   "September"                    bare month, never refreshed
+#   "September 3, 2026"            fully dated (day filled in by hand)
+#   "September&nbsp; , 2026"       refresh_template()'s own placeholder
+#                                   output (day not yet filled in) — see
+#                                   the `date_replacement` string below,
+#                                   which is what this pattern must also
+#                                   recognize as input on the NEXT refresh.
 _TEMPLATE_DATE_RE = re.compile(
     r'(<span style="text-decoration: underline; font-family: Verdana;">)'
-    r'([A-Z][a-z]+(?:\s+\d+,\s+\d{4})?)'  # month, optionally with " N, YYYY"
+    r'([A-Z][a-z]+(?:(?:&nbsp;|\s+\d+)?\s*,\s*\d{4})?)'
     r'(</span>)')
 
 # Month-name normalisation
