@@ -2962,8 +2962,8 @@ def h_list(tag, items):
 
 def h_divider():
     return (
-        f'<img src="{LINE_GIF}" alt="" width="100%" height="2" '
-        f'style="display:block;margin:0 0 22px 0;border:0;">\n'
+        f'<img src="{LINE_GIF}" alt="" height="2" '
+        f'style="display:block;width:100%;margin:0 0 22px 0;border:0;">\n'
     )
 
 
@@ -3845,6 +3845,42 @@ def ensure_responsive_images(html):
     return html, True
 
 
+def fix_legacy_font_tags(html):
+    """Strip <font face="Verdana">...</font> wrappers from the archive's
+    static page chrome (masthead, footer, bottom-nav links) — the W3C
+    validator flags the element as obsolete, and it carries no real
+    size/color semantics: Verdana is already the page's ambient font
+    everywhere, so the wrapper is pure redundancy. None of these are
+    nested (each wraps its own row/line independently), so a plain
+    substitution is safe.
+    Returns (possibly modified html, True/False whether anything changed).
+    """
+    fixed = re.sub(r'<font\s+face="Verdana">([\s\S]*?)</font>', r'\1', html)
+    return fixed, (fixed != html)
+
+
+def fix_legacy_img_width(html):
+    """Move a literal width="100%" HTML attribute on <img> tags into the
+    inline style — the width attribute must be a bare pixel digit per
+    HTML5, so a percentage value is a validator error. Handles the
+    attribute appearing either before or after an existing style
+    attribute in the tag.
+    Returns (possibly modified html, True/False whether anything changed).
+    """
+    def _fix(m):
+        tag = m.group(0)
+        if 'width="100%"' not in tag:
+            return tag
+        tag = tag.replace(' width="100%"', '', 1)
+        if 'style="' in tag:
+            tag = tag.replace('style="', 'style="width:100%;', 1)
+        else:
+            tag = re.sub(r'>\s*$', ' style="width:100%;">', tag)
+        return tag
+    fixed = re.sub(r'<img\b[^>]*>', _fix, html)
+    return fixed, (fixed != html)
+
+
 def prepend_to_archive(archive_path, entries):
     """Prepend new entries to the modern news2.html archive."""
     archive_path = Path(archive_path)
@@ -3865,6 +3901,14 @@ def prepend_to_archive(archive_path, entries):
     if css_fixed:
         print("  Added responsive-image CSS to archive (mobile banner fix).")
 
+    html, font_fixed = fix_legacy_font_tags(html)
+    if font_fixed:
+        print("  Removed obsolete <font> tags from archive page chrome.")
+
+    html, img_width_fixed = fix_legacy_img_width(html)
+    if img_width_fixed:
+        print("  Fixed invalid width=\"100%\" attribute on archive <img> tags.")
+
     # RE-RUN PROTECTION: skip any entry whose dated heading is already in
     # the archive, so running the script twice cannot duplicate a day, and
     # a multi-day news.html only injects the days not yet archived.
@@ -3878,7 +3922,17 @@ def prepend_to_archive(archive_path, entries):
         print(f"  {skipped} entr{'y' if skipped == 1 else 'ies'} already in "
               f"archive — skipped (re-run protection).")
     if not fresh:
-        print("  Nothing new to add — archive left untouched.")
+        # Even with no new entry to append, any of the opportunistic
+        # cleanups above may have changed `html` in memory -- write it
+        # back, or the fix silently never reaches disk and re-appears in
+        # every validator run.
+        if head_fixed or css_fixed or font_fixed or img_width_fixed:
+            tmp = archive_path.with_name(archive_path.name + ".tmp")
+            tmp.write_text(html, encoding="utf-8")
+            tmp.replace(archive_path)
+            print("  Archive chrome cleaned up (no new entry to add).")
+        else:
+            print("  Nothing new to add — archive left untouched.")
         return True
 
     if BACKUP_ARCHIVE:
