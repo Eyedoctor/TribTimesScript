@@ -194,8 +194,30 @@ def extract_entries(html):
                     feast = {"url": "", "link_text": plain, "tail": ""}
                 block = block.replace(fm.group(0), "", 1)
 
+        # Standalone bold administrative notice (e.g. a holiday/recess
+        # announcement) sitting alone on the date line before any other
+        # content, e.g.:
+        #   <b><font size="-1">THE TRIB TIMES WILL RETURN AFTER A SHORT
+        #   LABOR DAY RECESS, GOD WILLING (James 4:15).</font></b>
+        # This shape has no <small>/<a>, so none of the news-item, scripture,
+        # quote, or feast extractors ever see it -- it must be pulled out
+        # explicitly here and, like the feast invocation, STRIPPED from the
+        # block so it can't be mistaken for later content. Only the FIRST
+        # bold tag before the entry's first link is considered, so a bold
+        # phrase used for emphasis later in a real news item is never
+        # mistaken for this lead-in notice.
+        announcement = None
+        _first_a = re.search(r'<a[\s>]', block, re.IGNORECASE)
+        _lead = block[:_first_a.start()] if _first_a else block
+        bm = re.search(r'<b(?:\s[^>]*)?>(.*?)</b>', _lead, re.IGNORECASE | re.DOTALL)
+        if bm and not re.search(r'<small', bm.group(1), re.IGNORECASE):
+            plain = " ".join(re.sub(r"<[^>]+>", " ", bm.group(1)).split()).strip()
+            if len(plain) >= 15:
+                announcement = plain
+                block = block.replace(bm.group(0), "", 1)
+
         entries.append({"date": date_str, "subtitle": subtitle,
-                        "feast": feast, "block": block})
+                        "feast": feast, "announcement": announcement, "block": block})
 
     return entries
 
@@ -441,6 +463,24 @@ def get_social_report(block):
             continue
         href = a.get("href", "")
         if not ("x.com/" in href or "twitter.com/" in href):
+            continue
+        # If a distinct label word precedes the link inside the same bold
+        # span (e.g. "VIA <a>X Sachin Jose</a>: ..."), the link's own text
+        # is NOT a self-label -- get_source_for_link() already finds "VIA"
+        # as this item's real source label and get_news_items() renders it
+        # as a normal card. Matching it here too would render the same
+        # item a second time as a duplicate quote box, with the "VIA"
+        # prefix wrongly swept into the body text below.
+        _prev_sib = a.previous_sibling
+        _has_prefix = False
+        while _prev_sib is not None:
+            _pt = (str(_prev_sib) if isinstance(_prev_sib, NavigableString)
+                   else _prev_sib.get_text(" ", strip=True))
+            if _pt.strip():
+                _has_prefix = True
+                break
+            _prev_sib = _prev_sib.previous_sibling
+        if _has_prefix:
             continue
         label = a.get_text(strip=True)
         if not label or len(label) > 40:
@@ -944,6 +984,14 @@ def get_following_features(link, soup, doc_order=None, inline_ids=None, excluded
                 elif prev.name in ("ul", "ol"):
                     break  # a different list's territory — stop, no label
                 elif prev.name == "span":
+                    # If this span contains the very link that owns this
+                    # list (e.g. "<span><small>VIA X</small> <a>Sr.
+                    # Mary...</a>: Twelve Quotes...</span>"), its label was
+                    # already captured by get_source_for_link() for the
+                    # card header -- pulling it out again here would
+                    # duplicate it as a bogus subheading above the list.
+                    if any(d is link for d in prev.descendants):
+                        break
                     # Look for the LAST <small> inside the span
                     smalls = prev.find_all("small")
                     if smalls:
@@ -961,6 +1009,13 @@ def get_following_features(link, soup, doc_order=None, inline_ids=None, excluded
                             label_found = label_text
                             break
                 elif prev.name == "br": pass
+                elif prev.name == "a":
+                    # Reached the owning link itself (or an earlier item's
+                    # link) -- its own source label was already captured by
+                    # get_source_for_link() for the card header. Walking
+                    # further back would re-discover that same label (e.g.
+                    # "VIA X") and duplicate it as a bogus subheading here.
+                    break
                 # Don't break on other <ul> — keep walking back
             prev = getattr(prev, "previous_sibling", None)
         if label_found:
@@ -2810,6 +2865,20 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
         f'{ex_html}{feat_html}{post_list_html}{concluding_html}</td></tr></table>\n'
     )
 
+def h_announcement(text):
+    """Standalone bold administrative notice (e.g. a holiday/recess notice)
+    that precedes the day's content with no link of its own -- a centered
+    crimson banner across the top of the entry."""
+    if not text:
+        return ""
+    return (
+        f'<div style="background-color:{C["crimson"]};color:#f5f0e8;'
+        f'padding:10px 16px;margin:0 0 18px 0;text-align:center;'
+        f'font-family:Verdana,Arial,sans-serif;font-size:13px;font-weight:bold;'
+        f'letter-spacing:0.5px;line-height:1.5;">{text}</div>\n'
+    )
+
+
 def h_scripture(ref, text):
     """Gold left-border scripture blockquote."""
     label = f"({ref})&nbsp; " if ref else ""
@@ -3309,6 +3378,9 @@ def build_entry_html(entry, include_header=True):
     subtitle = entry["subtitle"]
 
     out = h_entry_header(date, subtitle, entry.get("feast")) if include_header else ""
+
+    # Standalone administrative notice (e.g. a holiday recess announcement)
+    out += h_announcement(entry.get("announcement"))
 
     # Scripture verse
     ref, scripture = get_scripture(block)
