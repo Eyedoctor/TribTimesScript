@@ -130,12 +130,19 @@ _LADDER_STEP_RE = re.compile(
     r'\s*(?:["\u201d\u201f]|&(?:quot|rdquo);)'
 )
 # Quote regexes for both known archive formats.
-# KompoZer format (catholicprophecy.info archives, template.html):
+# KompoZer format (catholicprophecy.info archives):
 #   <font style="font-family: Verdana;" face="Verdana">N. text …</font>
 # The face="Verdana" attribute is inconsistent across entries — some have
 # it, some don't — so we only require the Verdana font-family style.
 _LADDER_QUOTE_RE_KOMPOZER = re.compile(
     r'<font[^>]*style="[^"]*Verdana[^"]*"[^>]*>\s*(\d{1,3})\.\s+(.*?)</font>',
+    re.DOTALL)
+# Modernized KompoZer format (template.html, after the obsolete <font>
+# elements there were converted to <span> for W3C validity) — identical
+# shape to the KOMPOZER pattern above, just with <span>/</span> in place
+# of <font>/</font>.
+_LADDER_QUOTE_RE_SPAN = re.compile(
+    r'<span[^>]*style="[^"]*Verdana[^"]*"[^>]*>\s*(\d{1,3})\.\s+(.*?)</span>',
     re.DOTALL)
 # Modern tribtimes.com format (news2.html, script-generated archives):
 #   <p style="...font-style:italic;...color:#3d2b0d;...">N. text …</p>
@@ -145,7 +152,8 @@ _LADDER_QUOTE_RE_MODERN = re.compile(
     r'<p[^>]*style="[^"]*font-style:italic[^"]*color:#3d2b0d[^"]*"[^>]*>'
     r'\s*(\d{1,3})\.\s+(.*?)</p>',
     re.DOTALL)
-_LADDER_QUOTE_PATTERNS = (_LADDER_QUOTE_RE_KOMPOZER, _LADDER_QUOTE_RE_MODERN)
+_LADDER_QUOTE_PATTERNS = (_LADDER_QUOTE_RE_KOMPOZER, _LADDER_QUOTE_RE_SPAN,
+                           _LADDER_QUOTE_RE_MODERN)
 
 
 def _parse_ladder_quotes(html):
@@ -159,8 +167,9 @@ def _parse_ladder_quotes(html):
     the quote to one long line. `snippet` is a single-line, whitespace-
     collapsed preview for console/log output only.
 
-    A "quote" is a <font face=\"Verdana\">N. …</font> tag, and it inherits
-    the most-recently-seen \"Step N — Title\" header preceding it."""
+    A "quote" is a <font>/<span> face=\"Verdana\" or <p> (modern format)
+    tag matching one of _LADDER_QUOTE_PATTERNS above, and it inherits the
+    most-recently-seen \"Step N — Title\" header preceding it."""
     events = []
     for m in _LADDER_STEP_RE.finditer(html):
         events.append((m.start(), 'step', int(m.group(1)), m.group(2)))
@@ -442,22 +451,29 @@ def refresh_template(target_year, target_month, folder,
             f'Step {q["step_num"]}- "{q["step_title"]}"',
             entry_html, count=1)
 
-        # (c) Quote font tag → same wrapper, new "N. text"
+        # (c) Quote font/span tag → same wrapper, new "N. text". Template
+        # entries may use either shape (see _LADDER_QUOTE_RE_KOMPOZER vs.
+        # _LADDER_QUOTE_RE_SPAN above), so try both and keep whichever
+        # tag name actually matched for the closing tag / orphan-period scan.
         quote_match = _LADDER_QUOTE_RE_KOMPOZER.search(entry_html)
+        close_tag, next_tag_pattern = "</font>", r'<font[^>]*>'
+        if quote_match is None:
+            quote_match = _LADDER_QUOTE_RE_SPAN.search(entry_html)
+            close_tag, next_tag_pattern = "</span>", r'<span[^>]*>'
         if quote_match:
             open_end = quote_match.group(0).index(">") + 1
             open_tag = quote_match.group(0)[:open_end]
-            replacement = f'{open_tag}{q["quote_num"]}. {q["quote_text"]}</font>'
+            replacement = f'{open_tag}{q["quote_num"]}. {q["quote_text"]}{close_tag}'
             tail = entry_html[quote_match.end():]
             # The Ladder source files write each verse's closing period
-            # inside the same <font> tag as the sentence, so quote_text
+            # inside the same wrapper tag as the sentence, so quote_text
             # above already ends with one. Some existing template entries
-            # instead carry that period on its own in the very next <font>
+            # instead carry that period on its own in the very next wrapper
             # tag (a relic of an earlier refresh cycle) — left alone, that
             # would render as a doubled "..". Strip just the stray period,
             # keeping the tag (and any trailing <br>) intact.
             if re.search(r'[.!?]\s*$', q["quote_text"]):
-                orphan_period = re.match(r'(\s*<font[^>]*>\s*)\.', tail)
+                orphan_period = re.match(r'(\s*' + next_tag_pattern + r'\s*)\.', tail)
                 if orphan_period:
                     tail = orphan_period.group(1) + tail[orphan_period.end():]
             entry_html = entry_html[:quote_match.start()] + replacement + tail
