@@ -902,7 +902,15 @@ def get_following_features(link, soup, doc_order=None, inline_ids=None, excluded
     feature_items = []
     _owner_href = (link.get("href") or "").strip()
 
-    # Level 1: direct siblings of the link (simple case)
+    # Level 1: direct siblings of the link (simple case). Stops (falls
+    # through to the doc-order Level 2 check below) as soon as ANOTHER real
+    # link is reached first -- either directly, or nested inside a wrapping
+    # container like the next item's own "<span><small>LABEL</small>:
+    # <a>...</a></span>" header. A <ul>/<ol> reached only by walking PAST
+    # such a link belongs to that later link (or one after it), not to this
+    # one -- without this check, e.g. two headline links with no <small>
+    # between them, followed eventually by a bullet list that's really the
+    # SECOND headline's, both get mis-credited with owning that same list.
     nxt = link.next_sibling
     for _ in range(8):
         if nxt is None:
@@ -922,6 +930,14 @@ def get_following_features(link, soup, doc_order=None, inline_ids=None, excluded
                 return feature_items
             elif nxt.name == "small":
                 break
+            elif nxt.name == "a":
+                if nxt.get_text(strip=True) and (nxt.get("href") or "").strip():
+                    break
+            elif not isinstance(nxt, NavigableString):
+                _inner_a = nxt.find("a", href=True)
+                if (_inner_a is not None and _inner_a.get_text(strip=True)
+                        and (_inner_a.get("href") or "").strip()):
+                    break
         nxt = getattr(nxt, "next_sibling", None)
 
     # Level 2: check every <ul>/<ol> in the block to see if THIS link
@@ -1326,14 +1342,17 @@ def _span_precedes_new_item(span_or_font, current_url=""):
     instead of stopping here both strips the embedded link and later
     duplicates the item once that same link surfaces on its own.
     """
-    if span_or_font.find("small") is None:
-        return False
+    has_small = span_or_font.find("small") is not None
     a = span_or_font.find("a", href=True)
     if a is None:
-        # The label's <small> may be wrapped together with its trailing
-        # ": " in this span, with the actual link sitting OUTSIDE it as a
-        # sibling instead of nested inside, e.g.
-        # <span><small>X</small>: </span><a href="...">Title</a>.
+        # The label's <small> (when present) may be wrapped together with
+        # its trailing ": " in this span, with the actual link sitting
+        # OUTSIDE it as a sibling instead of nested inside, e.g.
+        # <span><small>X</small>: </span><a href="...">Title</a>. The same
+        # shape also occurs WITHOUT a <small> at all — some raw entries
+        # label a source in a bare <span style="font-family: Verdana;">
+        # with no bold/small styling whatsoever, e.g.
+        # <span>MAGISTERIUM AI:&nbsp; </span><a href="...">Title</a>.
         nxt = span_or_font.next_sibling
         for _ in range(3):
             if nxt is None:
@@ -1348,6 +1367,15 @@ def _span_precedes_new_item(span_or_font, current_url=""):
                 return False
             nxt = nxt.next_sibling
         if a is None:
+            return False
+    if not has_small:
+        # No <small>/bold styling at all — only treat this as a new item's
+        # label if the span's own text reads like a short ALL-CAPS source
+        # label (e.g. "MAGISTERIUM AI:"), not ordinary body prose that
+        # happens to be followed by a link.
+        _t = span_or_font.get_text(" ", strip=True).strip(" :\xa0")
+        _letters = "".join(ch for ch in _t if ch.isalpha())
+        if not (_t and len(_t) <= 40 and _letters and _letters == _letters.upper()):
             return False
     href = (a.get("href") or "").strip()
     return bool(href and not skip_url(href) and a.get_text(strip=True)
@@ -3098,6 +3126,16 @@ def _detect_inline_and_clusters(soup):
                         br += 1
                         if br >= 2:
                             break
+                    # A block-level element (bulleted/numbered list, table)
+                    # sitting between the two anchors is always a boundary,
+                    # regardless of <br> count — e.g. a source's headline
+                    # link followed by its own <ul> feature list, followed
+                    # by the NEXT source's label+link, must not fuse that
+                    # next source into this one's cluster just because only
+                    # one bare <br> separates the list from it.
+                    if hasattr(cur, "name") and cur.name in ("ul", "ol", "table"):
+                        br = 2
+                        break
                     cur = cur.next_element
                 if br < 2:
                     inline_ids.add(id(a))
