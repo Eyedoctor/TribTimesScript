@@ -567,6 +567,46 @@ def get_pull_quote(block):
     return text, attr
 
 
+def get_unlinked_quote(block):
+    """Return (text, start_pos) for a bold-italic quoted excerpt set apart in
+    <small><span> styling with no link and no ALL-CAPS source label of its
+    own -- e.g. a short attributed ancient/prayer text quoted after a
+    headline item (this is distinct from a plain-bold <small> SOURCE LABEL
+    like "ALETEIA", which is bold but not italic, and from the feast-day
+    invocation on the date line, which is also bold+italic but is stripped
+    out of the block by extract_entries() before this ever runs).
+
+    The source sometimes splits trailing punctuation/attribution into a
+    sibling <small> right after the first one closes (and may interleave
+    stray unrecognized tags, e.g. an accidentally-pasted citation-footnote
+    snippet) -- capture through to the next <br> (like get_ladder() does)
+    so that tail isn't cut off, then strip tags and collapse any space that
+    ends up sitting before trailing punctuation.
+
+    start_pos is the quote's character offset within `block`, used by the
+    caller to insert the rendered quote at its actual source-order position
+    among the entry's news items (like the collect/social-report blocks),
+    rather than always forcing it to the top of the entry. Returns
+    ("", -1) if no such quote is found.
+    """
+    m = re.search(
+        r'<small[^>]*>\s*<span(?=[^>]*font-weight:\s*bold)(?=[^>]*font-style:\s*italic)[^>]*>'
+        r'(.+?)(?:<br|</p>|<hr|$)',
+        block, re.IGNORECASE | re.DOTALL
+    )
+    if not m:
+        return "", -1
+    inner = m.group(1)
+    if re.search(r'<a\s[^>]*href=', inner, re.IGNORECASE):
+        return "", -1  # already handled by get_collect() -- a labeled quote
+    text = re.sub(r'<[^>]+>', ' ', inner)
+    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'\s+([,.;:!?\]])', r'\1', text)
+    if len(text) < 20:
+        return "", -1
+    return text, m.start()
+
+
 def _clean_ladder_text(raw):
     """Strip tags to spaces, collapse whitespace, and drop any space that
     ends up sitting before punctuation — the source often splits the excerpt
@@ -1245,6 +1285,30 @@ def _looks_like_new_item_anchor(a, current_url=""):
     return False
 
 
+def _inline_html_text(node):
+    """Flatten a tag's contents to text the way get_text() does, but (a)
+    preserve <em>/<i>/<strong>/<b>/<u> as their own tags instead of
+    silently dropping the emphasis, and (b) concatenate children directly
+    with no inserted separator, so a tag boundary that has no whitespace on
+    either side in the source (e.g. "<strong>inspiring</strong>.") doesn't
+    grow a spurious space before trailing punctuation the way
+    get_text(separator=" ") does -- each NavigableString already carries
+    whatever whitespace was actually present around it in the source."""
+    if isinstance(node, NavigableString):
+        return str(node)
+    name = getattr(node, "name", None)
+    if name == "br":
+        return " "
+    inner = "".join(_inline_html_text(c) for c in node.children)
+    if name in ("em", "i"):
+        return f"<em>{inner}</em>"
+    if name in ("strong", "b"):
+        return f"<strong>{inner}</strong>"
+    if name == "u":
+        return f"<u>{inner}</u>"
+    return inner
+
+
 def _p_subheading_fragments(p_tag, label_marker=None):
     """Split a <p>'s children on internal <br><br> boundaries into
     excerpt-ready fragments, instead of flattening the whole paragraph to
@@ -1318,8 +1382,7 @@ def _p_subheading_fragments(p_tag, label_marker=None):
                         f'color:#7a1c1c;">{label}</strong>')
                 continue
         text = " ".join(
-            "".join(str(c) if isinstance(c, NavigableString)
-                    else c.get_text(" ", strip=True) for c in seg).split()
+            "".join(_inline_html_text(c) for c in seg).split()
         ).strip()
         if not text:
             continue
@@ -1599,7 +1662,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                             _consumed.add(a_href)
                     # Otherwise: inline body link — leave to existing handling.
                 elif name == "big":
-                    add(nxt.get_text(" ", strip=True))
+                    add(" ".join(_inline_html_text(nxt).split()))
                 elif name == "p":
                     # Stop if the <p> contains a news link (it's a news item like UNIVERSALIS)
                     inner_a = nxt.find("a", href=True)
@@ -3511,6 +3574,15 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
             f'</td></tr></table>\n'
         )
 
+    # Bold-italic quoted excerpt with no link/label of its own (e.g. a short
+    # attributed ancient/prayer text following a headline item) -- rendered
+    # as a parchment pull-quote box, same as get_pull_quote()'s, but placed
+    # at its actual source-order position among the news items below rather
+    # than pinned to the top (unlike the Pope/Saint pull-quote above, which
+    # is always the entry's lead epigraph).
+    uq_text, uq_pos = get_unlinked_quote(block)
+    uq_html = h_pull_quote(uq_text) if uq_text else ""
+
     # Document-order position of the collect quote / social post, so each
     # lands in the right place relative to the news items around it.
     def _src_pos(u):
@@ -3526,6 +3598,8 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
         _pending.append((_src_pos(collect_url), collect_html))
     if sr_text:
         _pending.append((_src_pos(sr_url), sr_html))
+    if uq_text:
+        _pending.append((uq_pos if uq_pos != -1 else 10 ** 9, uq_html))
     _pending.sort(key=lambda p: p[0])
     _pending_idx = 0
 
