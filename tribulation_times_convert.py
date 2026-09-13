@@ -77,7 +77,7 @@ COLORS = {
 
 SUBSCRIBE_URL    = "http://groups.google.com/group/tribulaton-times/subscribe"
 ARCHIVES_URL     = "http://www.tribtimes.com/news2.html"
-LADDER_URL       = "http://www.catholicprophecy.info/ladder.html"
+LADDER_URL       = "https://www.catholicprophecy.info/ladder.html"
 LOGO_SRC         = "catholicprophecy.jpg"
 LINE_GIF         = "http://www.catholicprophecy.info/line.gif"
 BIBLE_YEAR_URL   = "https://bibleinayearonline.com/may-oyb/?version=63&startmmdd=0101"
