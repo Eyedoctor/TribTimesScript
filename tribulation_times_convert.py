@@ -1381,6 +1381,43 @@ def _p_subheading_fragments(p_tag, label_marker=None):
                         f'font-size:10px;letter-spacing:2px;text-transform:uppercase;'
                         f'color:#7a1c1c;">{label}</strong>')
                 continue
+        if len(seg) > 1 and getattr(seg[0], "name", None) == "small":
+            # A short bold (non-italic) label glued to the START of a
+            # segment that also carries its own body text in the same <p>
+            # (no <br><br> separating them) -- e.g. "<small><span
+            # style='font-weight:bold'>Fr. Pasolini</span></small>: I
+            # believe..." -- falls through the single-tag-only check above
+            # (the segment has more than one child) and would otherwise be
+            # flattened by get_text() into plain prose, silently losing the
+            # label styling that an identically-marked-up label gets when it
+            # sits as a standalone segment (e.g. a "Q:" line right before
+            # it). Split the label into its own styled fragment here too,
+            # keeping the remainder of the segment as the body paragraph.
+            sm = seg[0]
+            sp = sm.find("span", style=True)
+            sst = (sp.get("style") or "").replace(" ", "") if sp else ""
+            label = " ".join(sm.get_text(" ", strip=True).split())
+            rest_raw = "".join(_inline_html_text(c) for c in seg[1:])
+            if ("font-weight:bold" in sst and "font-style:italic" not in sst
+                    and label and len(label) <= 80
+                    and '"' not in label and '“' not in label
+                    and sm.find("a", href=True) is None
+                    and rest_raw.lstrip().startswith(":")):
+                if label_marker is not None:
+                    fragments.append(f'{label_marker}{label}')
+                else:
+                    fragments.append(
+                        f'<strong style="font-family:Verdana,Arial,sans-serif;'
+                        f'font-size:10px;letter-spacing:2px;text-transform:uppercase;'
+                        f'color:#7a1c1c;">{label}</strong>')
+                rest_text = " ".join(rest_raw.split()).strip()
+                rest_text = rest_text.lstrip(":").strip()
+                if rest_text:
+                    if ml_m:
+                        rest_text = (f'<span style="display:inline-block;'
+                                f'margin-left:{ml_m.group(1)}px;">{rest_text}</span>')
+                    fragments.append(rest_text)
+                continue
         text = " ".join(
             "".join(_inline_html_text(c) for c in seg).split()
         ).strip()
