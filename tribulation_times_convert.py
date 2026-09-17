@@ -2930,9 +2930,14 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
                     rows += f'</tbody></table>\n'
                     in_table = False
                 label_text = item[len("__LABEL__"):]
+                # This label introduces a bullet/headline list (e.g. "RELATED
+                # HEADLINES") -- it plays the same role as a source label
+                # (INFOVATICANA, EWTN NEWS), so it gets that same crimson
+                # letter-spacing/weight, not the tighter in-body-subheading
+                # style used for "Sixty Years of Nostra aetate"-type labels.
                 rows += (
                     f'<div style="font-family:Verdana,Arial,sans-serif;font-size:10px;'
-                    f'font-weight:bold;letter-spacing:1px;text-transform:uppercase;'
+                    f'font-weight:bold;letter-spacing:2px;text-transform:uppercase;'
                     f'color:{C["crimson"]};margin:10px 0 4px 0;">{label_text}</div>'
                 )
             else:
@@ -3761,7 +3766,7 @@ def footer():
     return f"""
 <div style="border-top:1px solid {C['rule']};padding-top:14px;font-family:Verdana,Arial,sans-serif;
             font-size:13px;color:{C['ink_mid']};line-height:1.8;">
-  <p style="margin:0 0 6px 0;"><em>Prayer request?</em>&nbsp; Send an email to:
+  <p style="margin:0 0 6px 0;"><em>Prayer request?&nbsp; Send an email to:</em>
     <a href="mailto:PrayerRequest3@aol.com"
        style="color:{C['link']};">PrayerRequest3@aol.com</a></p>
   <p style="margin:0 0 6px 0;"><em>Have ANY Catholic Question? Just ask Ron Smith at:</em>
