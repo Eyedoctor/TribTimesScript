@@ -3286,6 +3286,41 @@ def _flatten_for_cluster(node, inline_ids, link_color):
                     for c in node.children)
 
 
+def _small_block_is_bold(node):
+    """True if every non-blank text descendant of a <small> node is itself
+    wrapped in bold styling (a <b>/<strong>, or an element with
+    font-weight:bold). This is the raw-HTML shape news.html uses for a
+    fully-bold attributed quote glued onto the end of an article cluster
+    (e.g. "<small><a style="font-weight:bold">NAME</a><span
+    style="font-weight:bold">: '...quote...'</span></small>"), which should
+    keep its small+bold emphasis instead of being flattened to plain prose.
+    """
+    found_text = False
+    for desc in node.descendants:
+        if not isinstance(desc, NavigableString):
+            continue
+        if not str(desc).strip():
+            continue
+        found_text = True
+        bolded = False
+        anc = desc.parent
+        while anc is not None:
+            if hasattr(anc, "name"):
+                if anc.name in ("b", "strong"):
+                    bolded = True
+                    break
+                _st = (anc.get("style") or "").replace(" ", "")
+                if "font-weight:bold" in _st:
+                    bolded = True
+                    break
+            if anc is node:
+                break
+            anc = anc.parent
+        if not bolded:
+            return False
+    return found_text
+
+
 def _capture_cluster_excerpt(primary_a, inline_ids, link_color):
     """Capture cluster content from primary_a's next sibling onward,
     climbing to parent-sibling scopes as needed, stopping at <br><br>
@@ -3393,6 +3428,19 @@ def _capture_cluster_excerpt(primary_a, inline_ids, link_color):
                             continue
                         else:
                             break
+                if node.name == "small" and _small_block_is_bold(node):
+                    # A fully-bold <small> block (e.g. a "NAME: 'quote'"
+                    # attribution) is a distinct fragment boundary, same as
+                    # a <p> -- keep its small+bold emphasis instead of
+                    # flattening it into the plain-weight prose around it.
+                    _flush()
+                    _flat = _flatten_for_cluster(node, inline_ids, link_color)
+                    if _flat.strip():
+                        fragments.append(
+                            f'<span style="font-weight:bold;font-size:13px;">'
+                            f'{_flat}</span>')
+                    node = node.next_sibling
+                    continue
                 if node.name == "p":
                     # A <p> is a distinct source paragraph boundary. Flush
                     # whatever text preceded it (e.g. the primary link's own
