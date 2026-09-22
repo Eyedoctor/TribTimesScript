@@ -778,12 +778,12 @@ def get_source_for_link(link):
                 t = str(child).strip(" :\n\xa0")
                 if t and len(t) > 1:
                     pre_text_parts.append(t)
-        source = " ".join(pre_text_parts).strip(" :()")
+        source = " ".join(pre_text_parts).strip(" :")
         # Strip any inner link text (non-main links inside the small)
         for inner_a in small_parent.find_all("a"):
             if inner_a is not link:
-                source = source.replace(inner_a.get_text(strip=True), "").strip(" :()")
-        source = re.sub(r'\(\s*\)', '', source).strip(" :()")
+                source = source.replace(inner_a.get_text(strip=True), "").strip(" :")
+        source = re.sub(r'\(\s*\)', '', source).strip(" :")
         if source and len(source) > 2:
             return source
 
@@ -820,9 +820,9 @@ def get_source_for_link(link):
                     t = last_span.get_text(" ", strip=True).strip(" :\n\xa0")
                     # Strip embedded link text (e.g. MAGISTERIUM.COM inside the span)
                     for inner_a in last_span.find_all("a"):
-                        t = t.replace(inner_a.get_text(), "").strip(" :()")
+                        t = t.replace(inner_a.get_text(), "").strip(" :")
                     # Clean remaining bracket fragments: "( )" -> ""
-                    t = re.sub(r'\(\s*\)', '', t).strip(" :()")
+                    t = re.sub(r'\(\s*\)', '', t).strip(" :")
                     # Reject if too long (> 80 chars) or contains quotes — it's content, not a label
                     if (t and len(t) > 2 and not t.startswith("(")
                             and len(t) <= 160 and '"' not in t and '“' not in t):
@@ -857,8 +857,8 @@ def get_source_for_link(link):
                 # Final fallback: whole <small> text minus embedded link text
                 t = prev.get_text(" ", strip=True).strip(" :")
                 for inner_a in prev.find_all("a"):
-                    t = t.replace(inner_a.get_text(), "").strip(" :()")
-                t = re.sub(r'\(\s*\)', '', t).strip(" :()")
+                    t = t.replace(inner_a.get_text(), "").strip(" :")
+                t = re.sub(r'\(\s*\)', '', t).strip(" :")
                 # Reject if too long or contains quotes
                 if (t and len(t) > 2 and len(t) <= 160
                         and '"' not in t and '\u201c' not in t):
@@ -1960,7 +1960,17 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                     if lbl: add(f'<strong>{lbl}</strong>')
                                 elif n.name == "span":
                                     # Stop if this span contains a news link (next item)
-                                    # but NOT if it's a same-URL continuation of the current item
+                                    # but NOT if it's a same-URL continuation of the
+                                    # current item, AND only when that link is genuinely
+                                    # the span's own LEADING label (little/no real prose
+                                    # before it) -- mirrors the identical "_leading"
+                                    # check used for a <p> a few branches below. A bare
+                                    # <span> can also hold an ENTIRE item's body as long
+                                    # <br>-separated prose (e.g. a forwarded testimony
+                                    # pasted with no <p> tags at all) with an inline
+                                    # citation link buried deep inside it; naively
+                                    # finding ANY link anywhere in the span and stopping
+                                    # there discarded all the prose before it.
                                     inner_a = n.find("a", href=True)
                                     if inner_a:
                                         ia_href = inner_a.get("href","")
@@ -1968,7 +1978,19 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                         if (ia_href and not skip_url(ia_href)
                                                 and inner_a.get_text(strip=True)
                                                 and not is_same_url):
-                                            break  # next news item starts here
+                                            _leading = ""
+                                            for _c in n.children:
+                                                if _c is inner_a or (hasattr(_c, "descendants")
+                                                        and any(d is inner_a for d in _c.descendants)):
+                                                    break
+                                                _leading += (str(_c) if isinstance(_c, NavigableString)
+                                                             else _c.get_text(" ", strip=True))
+                                            _leading = _leading.strip()
+                                            _looks_like_label = (_leading and len(_leading) < 40
+                                                    and _leading == _leading.upper()
+                                                    and any(ch.isalpha() for ch in _leading))
+                                            if not _leading or _looks_like_label:
+                                                break  # next news item starts here
                                     # Stop at bold source-label span (no link inside, but IS a label).
                                     # Allow dots/apostrophes/hyphens for common Catholic
                                     # titles (FR., ST., ABP., MSGR., O'HARA, ST-JEROME).
@@ -1982,12 +2004,16 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                             break  # source label — stop
                                     # Recurse INTO span to collect its content
                                     # (SeaMonkey often wraps paragraphs in spans)
+                                    _span_stop = False
                                     for child in n.children:
                                         if isinstance(child, NavigableString):
                                             t = str(child).strip(" :\n\xa0")
-                                            if t: add(t)
+                                            if t:
+                                                _br_run[0] = 0
+                                                add(t)
                                         elif hasattr(child, 'name') and child.name == 'p':
                                             # <p> inside span — process same as top-level <p>
+                                            _br_run[0] = 0
                                             pt = " ".join(child.get_text(" ", strip=True).split())
                                             WALK_STOP_P = ("Ladder of Divine Ascent", "Prayer request",
                                                            "This month", "Have ANY Catholic")
@@ -2002,6 +2028,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                                     add(pt)
                                         elif hasattr(child, "name"):
                                             if child.name == "small":
+                                                _br_run[0] = 0
                                                 pk2 = child.next_sibling
                                                 has_lnk2 = False
                                                 for _ in range(3):
@@ -2035,13 +2062,47 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                                                 has_lnk2 = True
                                                             break
                                                         pk3 = getattr(pk3, "next_sibling", None)
-                                                if not has_lnk2:
-                                                    lbl2 = child.get_text(" ", strip=True)
-                                                    if lbl2: add(f'<strong>{lbl2}</strong>')
-                                            elif child.name == "br": pass
+                                                if has_lnk2:
+                                                    # A source label immediately followed
+                                                    # by its own real link (e.g. "FULL
+                                                    # YOUTUBE LINK: <a>...</a>") heads the
+                                                    # NEXT item -- stop instead of silently
+                                                    # continuing past it and absorbing that
+                                                    # item's own link into this excerpt.
+                                                    _span_stop = True
+                                                    break
+                                                lbl2 = child.get_text(" ", strip=True)
+                                                if lbl2: add(f'<strong>{lbl2}</strong>')
+                                            elif child.name == "br":
+                                                _br_run[0] += 1
+                                                if _br_run[0] >= 2:
+                                                    _fresh_para[0] = True
+                                            elif child.name == "a":
+                                                _br_run[0] = 0
+                                                _a_href = (child.get("href") or "").strip()
+                                                if (_a_href and not skip_url(_a_href)
+                                                        and child.get_text(strip=True)
+                                                        and _a_href != _current_url):
+                                                    if _looks_like_new_item_anchor(child, _current_url):
+                                                        _span_stop = True
+                                                        break
+                                                    # Inline continuation link (e.g. a
+                                                    # hyperlinked word mid-sentence, such
+                                                    # as "...as seen in the video.") --
+                                                    # absorb it and keep walking instead
+                                                    # of losing it or letting it surface
+                                                    # later as a phantom separate item.
+                                                    _a_txt = child.get_text(strip=False)
+                                                    add(f'<a href="{esc_href(_a_href)}" target="_blank" '
+                                                        f'style="color:{C["link"]};font-weight:bold;">{_a_txt}</a>')
+                                                    if _consumed is not None:
+                                                        _consumed.add(_a_href)
                                             else:
+                                                _br_run[0] = 0
                                                 t = child.get_text(" ", strip=True)
                                                 if t and len(t) > 5: add(t)
+                                    if _span_stop:
+                                        break
                                 elif n.name in ("font", "b"):
                                     t = " ".join(n.get_text(" ", strip=True).split())
                                     WALK_STOP = ("Ladder of Divine Ascent", "Prayer request",
@@ -2799,7 +2860,32 @@ def get_news_items(block, _skip_urls=None):
                 _anchor_html = link.get_text(strip=False)
                 _lead_para = (f'{_lead_in} <a href="{esc_href(url)}" target="_blank" '
                               f'style="color:{C["link"]};font-weight:bold;">{_anchor_html}</a>')
-                excerpts = _leading_fragments + [_lead_para] + excerpts
+                # If the link's own enclosing <p> keeps going with more
+                # prose right after it (e.g. "This <a>video</a>\nwas taken
+                # ..." -- one sentence that only LOOKS split because the
+                # anchor happens to sit mid-paragraph), that continuation is
+                # exactly what excerpts[0] already holds -- merge them into
+                # one paragraph instead of rendering the single sentence as
+                # two separate <p> boxes.
+                _p_tail = link.next_sibling
+                _same_para_continues = False
+                while _p_tail is not None:
+                    if getattr(_p_tail, "name", None) == "br":
+                        break
+                    if isinstance(_p_tail, NavigableString):
+                        if _p_tail.strip():
+                            _same_para_continues = True
+                            break
+                        _p_tail = _p_tail.next_sibling
+                        continue
+                    _same_para_continues = True
+                    break
+                if (_same_para_continues and excerpts
+                        and not excerpts[0].startswith("<strong")):
+                    excerpts = (_leading_fragments + [f'{_lead_para} {excerpts[0]}']
+                                + excerpts[1:])
+                else:
+                    excerpts = _leading_fragments + [_lead_para] + excerpts
                 # The link now flows inline inside that leading paragraph
                 # rather than heading its own headline/excerpt block.
                 link_text = ""
