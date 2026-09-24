@@ -1551,6 +1551,13 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
 
     def add(t):
         t = " ".join(t.split()).strip()
+        if not excerpts and not t.startswith("<"):
+            # The first body fragment can inherit the headline's separator
+            # colon when news.html has the space on the wrong side of it
+            # (e.g. "<a>Title</a><span> :The dignity...</span>") -- the
+            # colon belongs between title and body, not at the start of
+            # the body paragraph.
+            t = t.lstrip(":;,  ")
         if not t:
             return
         # HTML label strings (subheadings) are positional — allow duplicates, no length filter
@@ -1745,6 +1752,10 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                         for _frag in _p_subheading_fragments(nxt):
                             _fresh_para[0] = True  # each fragment is its own paragraph
                             add(_frag)  # add() filters stop phrases
+                    # A closed </p> always ends its paragraph -- loose text
+                    # right after it (e.g. a bare <span> sentence) starts a
+                    # new one instead of merging into this paragraph.
+                    _fresh_para[0] = True
                 elif name in ("ul", "ol"):
                     # A bullet/feature list is owned and rendered entirely by
                     # get_following_features. Previously this case fell
@@ -2163,6 +2174,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                                     _consumed.add((_a_in_p2.get("href") or "").strip())
                                             _absorbed_inline2 = True
                                     if _absorbed_inline2:
+                                        _fresh_para[0] = True  # </p> ends the paragraph
                                         n = getattr(n, "next_sibling", None)
                                         continue
                                     # A <p> that introduces a following bullet
@@ -2202,6 +2214,12 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                         for _frag in _p_subheading_fragments(n):
                                             _fresh_para[0] = True  # each fragment is its own paragraph
                                             add(_frag)
+                                    # A closed </p> always ends its paragraph --
+                                    # loose text right after it (e.g. a bare
+                                    # <span> sentence, as in "...this year.</p>
+                                    # <span>According to the report...</span>")
+                                    # starts a new one instead of merging in.
+                                    _fresh_para[0] = True
                             n = getattr(n, "next_sibling", None)
                     walk_until_list(parent.next_sibling)
 
@@ -2687,7 +2705,20 @@ def get_news_items(block, _skip_urls=None):
                 # genuinely nothing -- no label AND no leading prose -- which
                 # means this is boilerplate/pure-bullet content.
                 _lf_probe, _li_probe = _capture_leading_turns(link)
-                if not (_lf_probe or _li_probe):
+                # A link that itself HEADS its <p> (nothing but whitespace
+                # before it, e.g. "<p><small><a bold>CBCN 2026 Plenary
+                # Assembly</a><span bold> :body...</span></small></p>") is
+                # an unlabeled headline item, not a pure bullet -- keep it.
+                # Otherwise it was dropped here and only resurfaced through
+                # repair_entry()'s generic card, losing its source styling.
+                _heads_p = True
+                for _d in in_p.descendants:
+                    if _d is link:
+                        break
+                    if isinstance(_d, NavigableString) and str(_d).strip(" \n\t\xa0"):
+                        _heads_p = False
+                        break
+                if not (_lf_probe or _li_probe or _heads_p):
                     continue  # no source and no leading prose in <p> → skip
 
         seen.add(url)
@@ -2799,6 +2830,20 @@ def get_news_items(block, _skip_urls=None):
                     " ".join(re.sub(r'<[^>]+>', '', e).split()).strip() in _container_text
                     for e in excerpts
                 )
+        # Headline link that opens a fully-bold <small> block which ALSO
+        # holds the item's body (e.g. "<small><a bold>CBCN 2026 Plenary
+        # Assembly</a><span bold> :The dignity...</span></small>") -- keep
+        # the body's small+bold emphasis instead of flattening it to plain
+        # 15px prose, same as the glued-on attribution case handled in
+        # _capture_cluster_excerpt.
+        body_small = False
+        _body_small_anc = link.find_parent("small")
+        if (not body_bold and excerpts and _body_small_anc is not None
+                and _small_block_is_bold(_body_small_anc)):
+            _small_text = " ".join(_body_small_anc.get_text(" ", strip=True).split())
+            if all(" ".join(re.sub(r'<[^>]+>', '', e).split()).strip() in _small_text
+                   for e in excerpts):
+                body_bold = body_small = True
         # X/Twitter links become news items only when explicitly labeled
         # (e.g. "VIDEO CATHOLIC VOTE:"); bare/embedded social links are skipped.
         if ("x.com/" in url or "twitter.com/" in url) and not source:
@@ -2900,6 +2945,7 @@ def get_news_items(block, _skip_urls=None):
             "excerpts":      excerpts,
             "feature_items": feature_items,
             "body_bold":     body_bold,
+            "body_small":    body_small,
         })
 
     # A bare "DONATE" item is never independent content — it's always a
@@ -2943,7 +2989,8 @@ def h_label(text):
     )
 
 
-def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=False):
+def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=False,
+           body_small=False):
     """Build one news item: source label + linked title + excerpts + ✦ feature table.
     When feature_items exist and there are multiple excerpts, the last excerpt is
     treated as a concluding paragraph and rendered AFTER the bullet list.
@@ -2951,8 +2998,11 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
     body_bold preserves source formatting for items whose whole quote (label
     + body) was one bold small block in the raw HTML (e.g. an unquoted
     Cardinal/Bishop citation) rather than a normal-weight news excerpt.
+    body_small additionally renders the body at the smaller 13px size used
+    for other small-bold source blocks (collect/social quote boxes).
     """
     _weight = "font-weight:bold;" if body_bold else ""
+    _size = "13px" if body_small else "15px"
     all_excerpts = [p for p in (excerpts or []) if p.strip(": \u00a0")]
 
     _last_is_label = bool(all_excerpts) and (
@@ -2981,7 +3031,7 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
             )
         else:
             ex_html += (
-                f'<p style="font-family:Verdana,Arial,sans-serif;font-size:15px;'
+                f'<p style="font-family:Verdana,Arial,sans-serif;font-size:{_size};'
                 f'{_weight}color:{C["ink_mid"]};line-height:1.7;margin:6px 0 0 0;">{para}</p>'
             )
 
@@ -2995,7 +3045,7 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
             )
         else:
             concluding_html += (
-                f'<p style="font-family:Verdana,Arial,sans-serif;font-size:15px;'
+                f'<p style="font-family:Verdana,Arial,sans-serif;font-size:{_size};'
                 f'{_weight}color:{C["ink_mid"]};line-height:1.7;margin:6px 0 0 0;">{para}</p>'
             )
 
@@ -3800,6 +3850,7 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
             item["excerpts"],
             item["feature_items"],
             item.get("body_bold", False),
+            item.get("body_small", False),
         )
     # Anything still pending came after every news item (or there were none).
     while _pending_idx < len(_pending):
