@@ -24,6 +24,7 @@ REQUIREMENTS:
     Python 3.7+  |  pip install beautifulsoup4
 """
 
+import html as _html
 import re
 import sys
 import shutil
@@ -600,11 +601,27 @@ def get_unlinked_quote(block):
     if re.search(r'<a\s[^>]*href=', inner, re.IGNORECASE):
         return "", -1  # already handled by get_collect() -- a labeled quote
     text = re.sub(r'<[^>]+>', ' ', inner)
+    # Drop invisible zero-width characters (the editor sometimes leaves a
+    # stray U+200D after a heading) so they neither pad a short heading past
+    # the length check below nor leak into the rendered quote box.
+    text = _ZERO_WIDTH_RE.sub('', text)
     text = re.sub(r'\s+', ' ', text).strip()
     text = re.sub(r'\s+([,.;:!?\]])', r'\1', text)
     if len(text) < 20:
         return "", -1
     return text, m.start()
+
+
+_ZERO_WIDTH_RE = re.compile('[​‌‍⁠﻿]')
+
+
+def _norm_compare_text(s):
+    """Tag-stripped, entity-decoded, zero-width-free, whitespace-collapsed,
+    casefolded text — for checking whether one piece of rendered content
+    already appears inside another."""
+    s = _html.unescape(re.sub(r'<[^>]+>', ' ', s))
+    s = _ZERO_WIDTH_RE.sub('', s)
+    return " ".join(s.split()).casefold()
 
 
 def _clean_ladder_text(raw):
@@ -1309,6 +1326,54 @@ def _inline_html_text(node):
     return inner
 
 
+# Opening tag of an italic, normal-weight in-article subheading fragment.
+# Excerpt strings starting with this (like the "<strong" bold subheading
+# labels) are positional labels, rendered as their own paragraph.
+ITALIC_SUBHEAD_OPEN = '<em style="font-style:italic;font-weight:normal;">'
+
+
+def _is_label_fragment(t):
+    """True for an excerpt fragment that is a subheading label (bold
+    "<strong..." or italic-only ITALIC_SUBHEAD_OPEN) rather than prose."""
+    return t.startswith("<strong") or t.startswith(ITALIC_SUBHEAD_OPEN)
+
+
+def _style_flags(el):
+    st = (el.get("style") or "").replace(" ", "").lower() if hasattr(el, "get") else ""
+    bold = "font-weight:bold" in st or getattr(el, "name", None) in ("b", "strong")
+    italic = "font-style:italic" in st or getattr(el, "name", None) in ("i", "em")
+    return bold, italic
+
+
+def _small_subheading_fragment(sm):
+    """Render a mid-article <small> subheading as an excerpt label fragment.
+
+    Usually these are bold(+italic) and get the crimson <strong> label
+    treatment. But a <small> that is italic with no bold anywhere on it,
+    inside it, or on its enclosing inline wrappers (e.g. a sermon's italic
+    sub-title under its headline) must not be promoted to a bold uppercase
+    heading -- keep it italic and normal-weight, as in the source."""
+    lbl = " ".join(sm.get_text(" ", strip=True).split())
+    lbl = _ZERO_WIDTH_RE.sub("", lbl).strip()
+    if not lbl:
+        return ""
+    bold = italic = False
+    for el in [sm] + sm.find_all(True):
+        b, i = _style_flags(el)
+        bold, italic = bold or b, italic or i
+    for anc in sm.parents:
+        if getattr(anc, "name", None) in (None, "[document]", "body", "html",
+                                          "td", "li", "div", "blockquote"):
+            break
+        b, i = _style_flags(anc)
+        bold, italic = bold or b, italic or i
+        if anc.name == "p":
+            break
+    if italic and not bold:
+        return f'{ITALIC_SUBHEAD_OPEN}{lbl}</em>'
+    return f'<strong>{lbl}</strong>'
+
+
 def _p_subheading_fragments(p_tag, label_marker=None):
     """Split a <p>'s children on internal <br><br> boundaries into
     excerpt-ready fragments, instead of flattening the whole paragraph to
@@ -1561,7 +1626,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
         if not t:
             return
         # HTML label strings (subheadings) are positional — allow duplicates, no length filter
-        is_label = t.startswith("<strong")
+        is_label = _is_label_fragment(t)
         _punct_only = bool(t) and all(ch in ".,:;!?\"'’”)»" for ch in t)
         if not is_label and len(t) <= 8:
             # Short trailing punctuation (e.g. a closing "." after a
@@ -1579,7 +1644,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
             return
         if not is_label:
             seen.add(t)
-        if is_label or _fresh_para[0] or not excerpts or excerpts[-1].startswith("<strong"):
+        if is_label or _fresh_para[0] or not excerpts or _is_label_fragment(excerpts[-1]):
             excerpts.append(t)
         else:
             # Continuation of the same source paragraph (no paragraph break
@@ -1967,8 +2032,8 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                         pk = getattr(pk, "next_sibling", None)
                                     if has_lnk: break
                                     # Section subheading — add as label
-                                    lbl = n.get_text(" ", strip=True)
-                                    if lbl: add(f'<strong>{lbl}</strong>')
+                                    lbl = _small_subheading_fragment(n)
+                                    if lbl: add(lbl)
                                 elif n.name == "span":
                                     # Stop if this span contains a news link (next item)
                                     # but NOT if it's a same-URL continuation of the
@@ -2082,8 +2147,8 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                                     # item's own link into this excerpt.
                                                     _span_stop = True
                                                     break
-                                                lbl2 = child.get_text(" ", strip=True)
-                                                if lbl2: add(f'<strong>{lbl2}</strong>')
+                                                lbl2 = _small_subheading_fragment(child)
+                                                if lbl2: add(lbl2)
                                             elif child.name == "br":
                                                 _br_run[0] += 1
                                                 if _br_run[0] >= 2:
@@ -2783,7 +2848,7 @@ def get_news_items(block, _skip_urls=None):
         # Check if the excerpt text (stripped of punctuation) overlaps with link_text
         lt_lower = link_text.lower()
         def _is_continuation(e, lt):
-            if e.startswith("<strong"):
+            if _is_label_fragment(e):
                 return False  # labels always kept
             el = e.lower().strip(" ,.:;")
             if not el or len(el) < 10:
@@ -2926,7 +2991,7 @@ def get_news_items(block, _skip_urls=None):
                     _same_para_continues = True
                     break
                 if (_same_para_continues and excerpts
-                        and not excerpts[0].startswith("<strong")):
+                        and not _is_label_fragment(excerpts[0])):
                     excerpts = (_leading_fragments + [f'{_lead_para} {excerpts[0]}']
                                 + excerpts[1:])
                 else:
@@ -3006,7 +3071,8 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
     all_excerpts = [p for p in (excerpts or []) if p.strip(": \u00a0")]
 
     _last_is_label = bool(all_excerpts) and (
-        all_excerpts[-1].startswith("<strong") and all_excerpts[-1].endswith("</strong>"))
+        (all_excerpts[-1].startswith("<strong") and all_excerpts[-1].endswith("</strong>"))
+        or all_excerpts[-1].startswith(ITALIC_SUBHEAD_OPEN))
     if feature_items and len(all_excerpts) > 1 and len(all_excerpts) <= 6 and not _last_is_label:
         # Short item with a feature list: excerpts before list, last as concluding para.
         # A trailing subheading label is never eligible for this move — it belongs
@@ -3807,6 +3873,26 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
     # than pinned to the top (unlike the Pope/Saint pull-quote above, which
     # is always the entry's lead epigraph).
     uq_text, uq_pos = get_unlinked_quote(block)
+
+    # News items. The social-report URL is excluded here when it rendered
+    # as its own small-bold quote box above (sr_bold) so it isn't ALSO
+    # emitted as an ordinary card.
+    _news_skip_urls = {sr_url} if (sr_text and sr_bold and sr_url) else None
+    news_items = list(get_news_items(block, _skip_urls=_news_skip_urls))
+
+    # get_unlinked_quote() only knows the text is bold-italic; the same
+    # shape is also used for an in-article subheading (e.g. "An Ancient
+    # Tradition" inside a cluster), which get_news_items() has already
+    # rendered in place. Don't emit it a second time as a pull-quote box.
+    if uq_text:
+        _uq_norm = _norm_compare_text(uq_text)
+        for _it in news_items:
+            _rendered = " ".join(
+                [_it.get("link_text", "")] + list(_it.get("excerpts") or [])
+                + [str(f) for f in (_it.get("feature_items") or [])])
+            if _uq_norm and _uq_norm in _norm_compare_text(_rendered):
+                uq_text, uq_pos = "", -1
+                break
     uq_html = h_pull_quote(uq_text) if uq_text else ""
 
     # Document-order position of the collect quote / social post, so each
@@ -3829,11 +3915,7 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
     _pending.sort(key=lambda p: p[0])
     _pending_idx = 0
 
-    # News items. The social-report URL is excluded here when it rendered
-    # as its own small-bold quote box above (sr_bold) so it isn't ALSO
-    # emitted as an ordinary card.
-    _news_skip_urls = {sr_url} if (sr_text and sr_bold and sr_url) else None
-    for item in get_news_items(block, _skip_urls=_news_skip_urls):
+    for item in news_items:
         # Insert any collect/social block(s) before the first news item that
         # follows them in the source, in their own relative source order.
         _ipos = _src_pos(item.get("url", ""))
