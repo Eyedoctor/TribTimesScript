@@ -123,9 +123,12 @@ _LADDER_STEP_RE = re.compile(
     r'(?:[-\u2013\u2014:]|&[mn]dash;)?\s*'
     # opening quote: straight, curly-left, or HTML entities (&quot;, &ldquo;)
     r'(?:["\u201c\u201f]|&(?:quot|ldquo);)\s*'
-    # title text — anything up to the closing quote (stopping at newlines
-    # so we don't run away if the closing quote is malformed)
-    r'([^"\u201c\u201d\u201f\r\n<]{3,120}?)'
+    # title text — anything up to the closing quote. KompoZer word-wraps
+    # long titles across lines ("On talkativeness and\nsilence"), so line
+    # breaks are allowed; the 120-char cap and the stop at '<' keep a
+    # malformed closing quote from running away. Whitespace in the title
+    # is collapsed wherever it is used (in _parse_ladder_quotes).
+    r'([^"\u201c\u201d\u201f<]{3,120}?)'
     # closing quote: straight, curly-right, or HTML entities (&quot;, &rdquo;)
     r'\s*(?:["\u201d\u201f]|&(?:quot|rdquo);)'
 )
@@ -135,14 +138,14 @@ _LADDER_STEP_RE = re.compile(
 # The face="Verdana" attribute is inconsistent across entries — some have
 # it, some don't — so we only require the Verdana font-family style.
 _LADDER_QUOTE_RE_KOMPOZER = re.compile(
-    r'<font[^>]*style="[^"]*Verdana[^"]*"[^>]*>\s*(\d{1,3})\.\s+(.*?)</font>',
+    r'<font[^>]*style="[^"]*Verdana[^"]*"[^>]*>\s*(?:<br\s*/?>\s*)*(\d{1,3})\.\s+(.*?)</font>',
     re.DOTALL)
 # Modernized KompoZer format (template.html, after the obsolete <font>
 # elements there were converted to <span> for W3C validity) — identical
 # shape to the KOMPOZER pattern above, just with <span>/</span> in place
 # of <font>/</font>.
 _LADDER_QUOTE_RE_SPAN = re.compile(
-    r'<span[^>]*style="[^"]*Verdana[^"]*"[^>]*>\s*(\d{1,3})\.\s+(.*?)</span>',
+    r'<span[^>]*style="[^"]*Verdana[^"]*"[^>]*>\s*(?:<br\s*/?>\s*)*(\d{1,3})\.\s+(.*?)</span>',
     re.DOTALL)
 # Modern tribtimes.com format (news2.html, script-generated archives):
 #   <p style="...font-style:italic;...color:#3d2b0d;...">N. text …</p>
@@ -150,16 +153,70 @@ _LADDER_QUOTE_RE_SPAN = re.compile(
 # the file uses.
 _LADDER_QUOTE_RE_MODERN = re.compile(
     r'<p[^>]*style="[^"]*font-style:italic[^"]*color:#3d2b0d[^"]*"[^>]*>'
-    r'\s*(\d{1,3})\.\s+(.*?)</p>',
+    r'\s*(?:<br\s*/?>\s*)*(\d{1,3})\.\s+(.*?)</p>',
     re.DOTALL)
+# Older KompoZer archives sometimes put the quote directly in a Verdana
+# paragraph with no inner <font>/<span> (e.g. Step 10 #6 in nov08.html):
+#   <p style="font-family: Verdana;">6. text …<br><img src="line.gif" …></p>
+# There is no dedicated closing tag for the quote itself, so the text runs
+# up to the first <br>, <img> or </p>. Listed LAST so that the more
+# specific patterns above win when two patterns match at the same spot.
+_LADDER_QUOTE_RE_PARA = re.compile(
+    r'<p[^>]*style="[^"]*Verdana[^"]*"[^>]*>\s*(?:<br\s*/?>\s*)*(\d{1,3})\.\s+(.*?)'
+    r'(?=<br\s*/?>|<img\b|</p>)',
+    re.DOTALL)
+# All four patterns allow <br> tags between the opening tag and the
+# number (oct08.html has '<font …><br><br>4. He who has put…').
 _LADDER_QUOTE_PATTERNS = (_LADDER_QUOTE_RE_KOMPOZER, _LADDER_QUOTE_RE_SPAN,
-                           _LADDER_QUOTE_RE_MODERN)
+                          _LADDER_QUOTE_RE_MODERN, _LADDER_QUOTE_RE_PARA)
+# Closing tag written back for each pattern when the template's quote is
+# replaced ("" = the pattern has no closing tag of its own; the <br>/<img>/
+# </p> that ends it is left in place).
+_QUOTE_CLOSE_TAG = {
+    _LADDER_QUOTE_RE_KOMPOZER: ("</font>", r'<font[^>]*>'),
+    _LADDER_QUOTE_RE_SPAN:     ("</span>", r'<span[^>]*>'),
+    _LADDER_QUOTE_RE_MODERN:   ("</p>",    None),
+    _LADDER_QUOTE_RE_PARA:     ("",        None),
+}
 
 
-def _parse_ladder_quotes(html):
+def _only_markup(s):
+    """True if `s` holds nothing but tags, whitespace and &nbsp;."""
+    return not re.sub(r'<[^>]+>|&nbsp;', '', s).strip()
+
+
+def _find_quote_after_header(html, header_end):
+    """Find the Ladder quote that immediately follows a Step header ending
+    at `header_end`. "Immediately" means only markup/whitespace lies between
+    the header and the quote tag. Returns (match, pattern) or (None, None)."""
+    best = None
+    for rank, pattern in enumerate(_LADDER_QUOTE_PATTERNS):
+        m = pattern.search(html, header_end)
+        if m is None:
+            continue
+        if best is None or (m.start(), rank) < (best[0].start(), best[2]):
+            best = (m, pattern, rank)
+    if best is None or not _only_markup(html[header_end:best[0].start()]):
+        return None, None
+    return best[0], best[1]
+
+
+def _unreadable_quote_after_header(html, header_end):
+    """If a Step header is followed by numbered text ("6. I have known…")
+    that no quote pattern could read, return (quote_num, preview);
+    otherwise None. Looks only at the text right after the header."""
+    following = html[header_end:header_end + 1500]
+    text = re.sub(r'<[^>]+>|&nbsp;', ' ', following)
+    m = re.match(r'\s*(\d{1,3})\.\s+(.{0,70})', text, re.DOTALL)
+    if not m:
+        return None
+    return int(m.group(1)), re.sub(r'\s+', ' ', m.group(2)).strip()
+
+
+def _parse_ladder_quotes(html, unreadable=None):
     """Extract Ladder quotes with their Step context in document order.
     Returns list of dicts:
-      {step_num, step_title, quote_num, quote_text, snippet}
+      {step_num, step_title, quote_num, quote_text, snippet, pos}
     where quote_text is plain-text (HTML tags stripped) with the source's
     own word-wrapping preserved — these archives are hand-maintained and
     wrap each quote across several short lines separated by blank lines,
@@ -167,40 +224,46 @@ def _parse_ladder_quotes(html):
     the quote to one long line. `snippet` is a single-line, whitespace-
     collapsed preview for console/log output only.
 
-    A "quote" is a <font>/<span> face=\"Verdana\" or <p> (modern format)
-    tag matching one of _LADDER_QUOTE_PATTERNS above, and it inherits the
-    most-recently-seen \"Step N — Title\" header preceding it."""
-    events = []
-    for m in _LADDER_STEP_RE.finditer(html):
-        events.append((m.start(), 'step', int(m.group(1)), m.group(2)))
-    for pattern in _LADDER_QUOTE_PATTERNS:
-        for m in pattern.finditer(html):
-            events.append((m.start(), 'quote', int(m.group(1)), m.group(2)))
-    events.sort(key=lambda x: x[0])
+    Each quote is paired with the "Step N — Title" header directly above
+    it: the quote must follow its header with nothing but markup in
+    between. A numbered paragraph elsewhere on the page (a news item that
+    happens to start with "1.") is therefore never mistaken for a Ladder
+    quote.
 
-    current_step_num = None
-    current_step_title = None
+    If `unreadable` is a list, every Step header that IS followed by
+    numbered quote text in a shape none of _LADDER_QUOTE_PATTERNS can read
+    is appended to it as {step_num, step_title, quote_num, preview, pos}
+    — so the caller can warn instead of skipping the quote silently."""
     out = []
-    for evt in events:
-        if evt[1] == 'step':
-            current_step_num = evt[2]
-            current_step_title = evt[3]
+    for sm in _LADDER_STEP_RE.finditer(html):
+        step_num, step_title = int(sm.group(1)), re.sub(r'\s+', ' ', sm.group(2)).strip()
+        m, _pattern = _find_quote_after_header(html, sm.end())
+        if m is None:
+            if unreadable is not None:
+                hit = _unreadable_quote_after_header(html, sm.end())
+                if hit:
+                    unreadable.append({
+                        'step_num':   step_num,
+                        'step_title': step_title,
+                        'quote_num':  hit[0],
+                        'preview':    hit[1],
+                        'pos':        sm.start(),
+                    })
             continue
-        if current_step_num is None:
-            continue  # quote before any Step header — skip
-        _, _, qnum, qraw = evt
+        qnum, qraw = int(m.group(1)), m.group(2)
         # Strip HTML tags only — keep the source's internal line breaks
         # (its word-wrap) intact; just trim the leading/trailing
-        # whitespace the tag-stripping and the </font> boundary leave.
+        # whitespace the tag-stripping and the closing boundary leave.
         tags_stripped = re.sub(r'<[^>]+>', ' ', qraw)
         wrapped_text = tags_stripped.strip()
         collapsed_text = re.sub(r'\s+', ' ', tags_stripped).strip()
         out.append({
-            'step_num':   current_step_num,
-            'step_title': current_step_title,
+            'step_num':   step_num,
+            'step_title': step_title,
             'quote_num':  qnum,
             'quote_text': wrapped_text,
             'snippet':    collapsed_text[:80],
+            'pos':        m.start(),
         })
     return out
 
@@ -211,10 +274,15 @@ def _get_last_ladder_used(archive_html):
     quote whose <font> tag appears FIRST in the document is the latest
     posted — which for Ladder-continuation purposes is also the highest
     (step, quote) pair in reading order."""
-    quotes = _parse_ladder_quotes(archive_html)
-    if not quotes:
+    unreadable = []
+    quotes = _parse_ladder_quotes(archive_html, unreadable)
+    # An unreadable quote still tells us its Step and number, and that is
+    # all "last used" needs — so include it; otherwise a hard-to-parse
+    # quote at the top of the archive would make the script re-use it.
+    candidates = quotes + unreadable
+    if not candidates:
         return None, None
-    q = quotes[0]
+    q = min(candidates, key=lambda c: c['pos'])
     return q['step_num'], q['quote_num']
 
 
@@ -368,6 +436,8 @@ def refresh_template(target_year, target_month, folder,
     # Collect enough quotes across the source list; prompt for more if short
     collected = []
     used_sources = []
+    unreadable_in_sources = []      # (source filename, unreadable-quote dict)
+    start_cursor = (last_step, last_num)
     remaining_needed = entry_count
     pool = list(source_paths)
     while remaining_needed > 0:
@@ -391,6 +461,9 @@ def refresh_template(target_year, target_month, folder,
             return False
         used_sources.append(sp)
         src_html = sp.read_bytes().decode('utf-8')
+        _unread = []
+        _parse_ladder_quotes(src_html, _unread)
+        unreadable_in_sources.extend((sp.name, u) for u in _unread)
         # Take next N from THIS file (in reading order)
         got = _get_next_ladder_quotes(src_html, last_step, last_num, remaining_needed)
         # Filter out any (step, num) we've already collected
@@ -422,6 +495,41 @@ def refresh_template(target_year, target_month, folder,
     for q in next_quotes:
         print(f"    Step {q['step_num']} #{q['quote_num']}: {q['snippet']}")
 
+    # A quote that IS in a source file but whose markup the script couldn't
+    # read would otherwise be skipped silently — indistinguishable from a
+    # quote you skipped on purpose. Your deliberate skips never appear in
+    # the source at all, so anything listed here is a genuine read failure.
+    selected = {(q['step_num'], q['quote_num']) for q in next_quotes}
+    highest = max(selected)
+    missed = {}
+    for fname, u in unreadable_in_sources:
+        key = (u['step_num'], u['quote_num'])
+        if start_cursor < key <= highest and key not in selected:
+            missed.setdefault(key, (fname, u))
+    if missed:
+        print("\n  ⚠ WARNING — these quotes are in the source file but the script")
+        print("    could not read them, so they were SKIPPED:")
+        for key in sorted(missed):
+            fname, u = missed[key]
+            print(f"      Step {key[0]} #{key[1]} in {fname}: {u['preview'][:60]}")
+        print("    To keep template.html unchanged, answer N below, then send")
+        print("    that file to Claude so the script can learn its format.")
+
+    # Archive-table link for the month that just finished (e.g. sept26.html)
+    _pfx, _abbr = MONTHS[target_month]
+    _fname = f"{_pfx}{target_year % 100:02d}.html"
+    _, link_action = add_template_archive_link(template_html, target_year, target_month)
+    if link_action == "added":
+        print(f"\n  Archive table in template.html: will add {_abbr} {target_year} → {_fname}")
+    elif link_action == "already-present":
+        print(f"\n  Archive table in template.html: {_abbr} {target_year} link already present.")
+    elif link_action.startswith("other-link:"):
+        print(f"\n  Archive table in template.html: the {_abbr} {target_year} cell already holds "
+              f"a different link ({link_action.split(':', 1)[1].rsplit('/', 1)[-1]}) — leaving it alone.")
+    else:
+        print(f"\n  ⚠ Archive table in template.html: no slot found for {_abbr} {target_year} "
+              f"— add the {_fname} link by hand.")
+
     if not skip_confirm and not dry_run:
         try:
             reply = input("\n  Apply these changes to template.html? [y/N] ").strip().lower()
@@ -440,6 +548,7 @@ def refresh_template(target_year, target_month, folder,
     entry_starts = [m.start() for m in date_matches]
     entry_ends = entry_starts[1:] + [len(template_html)]
     new_html = template_html
+    write_problems = []
 
     for idx in reversed(range(entry_count)):
         entry_html = new_html[entry_starts[idx]:entry_ends[idx]]
@@ -458,19 +567,24 @@ def refresh_template(target_year, target_month, folder,
             f'Step {q["step_num"]}- "{q["step_title"]}"',
             entry_html, count=1)
 
-        # (c) Quote font/span tag → same wrapper, new "N. text". Template
-        # entries may use either shape (see _LADDER_QUOTE_RE_KOMPOZER vs.
-        # _LADDER_QUOTE_RE_SPAN above), so try both and keep whichever
-        # tag name actually matched for the closing tag / orphan-period scan.
-        quote_match = _LADDER_QUOTE_RE_KOMPOZER.search(entry_html)
-        close_tag, next_tag_pattern = "</font>", r'<font[^>]*>'
-        if quote_match is None:
-            quote_match = _LADDER_QUOTE_RE_SPAN.search(entry_html)
-            close_tag, next_tag_pattern = "</span>", r'<span[^>]*>'
+        # (c) Quote → same wrapper, new "N. text". Search only right after
+        # this entry's Step header, so a numbered news item earlier in the
+        # entry can never be overwritten by mistake.
+        header = _LADDER_STEP_RE.search(entry_html)
+        if header is None:
+            write_problems.append(f"entry {idx + 1}: no Ladder Step header found")
+            quote_match, qpat = None, None
+        else:
+            quote_match, qpat = _find_quote_after_header(entry_html, header.end())
+            if quote_match is None:
+                write_problems.append(
+                    f"entry {idx + 1}: couldn't find the old quote to replace")
         if quote_match:
-            open_end = quote_match.group(0).index(">") + 1
-            open_tag = quote_match.group(0)[:open_end]
-            replacement = f'{open_tag}{q["quote_num"]}. {q["quote_text"]}{close_tag}'
+            close_tag, next_tag_pattern = _QUOTE_CLOSE_TAG[qpat]
+            # Keep everything before the number — the opening tag plus any
+            # <br>s inside it — exactly as it was.
+            prefix = quote_match.group(0)[:quote_match.start(1) - quote_match.start()]
+            replacement = f'{prefix}{q["quote_num"]}. {q["quote_text"]}{close_tag}'
             tail = entry_html[quote_match.end():]
             # The Ladder source files write each verse's closing period
             # inside the same wrapper tag as the sentence, so quote_text
@@ -479,13 +593,49 @@ def refresh_template(target_year, target_month, folder,
             # tag (a relic of an earlier refresh cycle) — left alone, that
             # would render as a doubled "..". Strip just the stray period,
             # keeping the tag (and any trailing <br>) intact.
-            if re.search(r'[.!?]\s*$', q["quote_text"]):
+            if next_tag_pattern and re.search(r'[.!?]\s*$', q["quote_text"]):
                 orphan_period = re.match(r'(\s*' + next_tag_pattern + r'\s*)\.', tail)
                 if orphan_period:
                     tail = orphan_period.group(1) + tail[orphan_period.end():]
             entry_html = entry_html[:quote_match.start()] + replacement + tail
 
         new_html = new_html[:entry_starts[idx]] + entry_html + new_html[entry_ends[idx]:]
+
+    # Archive-table link (independent of the entries above, so any failure
+    # here is reported but never blocks the quote/date refresh itself).
+    new_html, link_action = add_template_archive_link(new_html, target_year, target_month)
+    if link_action == "no-slot":
+        write_problems.append(
+            f"archive table: no slot found for {_abbr} {target_year} ({_fname})")
+    elif link_action == "added" and _fname not in new_html:
+        write_problems.append(f"archive table: {_fname} link did not get written")
+
+    # Verify: re-read the edited template and confirm every entry now holds
+    # exactly the Step and quote intended for it, top to bottom.
+    expected = [(q['step_num'], q['quote_num']) for q in next_quotes]
+    actual = [(q['step_num'], q['quote_num']) for q in _parse_ladder_quotes(new_html)]
+    if actual != expected:
+        write_problems.append(
+            "check after editing: expected quotes "
+            + ", ".join(f"{s}#{n}" for s, n in expected)
+            + " but template now reads "
+            + (", ".join(f"{s}#{n}" for s, n in actual) or "none"))
+    if write_problems:
+        print("\n  ⚠ WARNING — template.html could not be updated cleanly:")
+        for p in sorted(set(write_problems)):
+            print(f"      {p}")
+        print("    Entries listed above may still show last month's quote.")
+        if not skip_confirm and not dry_run:
+            try:
+                reply = input("  Write template.html anyway? [y/N] ").strip().lower()
+            except EOFError:
+                reply = ""
+            if reply not in ("y", "yes"):
+                print("  Template refresh aborted — template.html unchanged.")
+                return False
+    else:
+        print(f"  ✓ Checked: all {entry_count} entries have the intended Step and quote"
+              + (f"; {_fname} link added to archive table." if link_action == "added" else "."))
 
     if dry_run:
         print("\n  Dry-run — template.html not written.")
@@ -498,6 +648,81 @@ def refresh_template(target_year, target_month, folder,
     template.write_bytes(new_html.encode('utf-8'))
     print(f"  Wrote: {template.name}")
     return True
+
+
+# ── Archive-table link inside template.html ─────────────────────────────
+# template.html carries the same year/month archive table as news2.html, but
+# in KompoZer markup: every cell is
+#   <td style="vertical-align: top;"><b><span style="font-size:smaller;">
+#       <a href="https://www.catholicprophecy.info/july26.html">Jul</a>
+#   </span></b></td>
+# and an unfilled cell is just <td style="vertical-align: top;"><br>…</td>.
+# Recent months (Jul, Aug) were added by hand with target="_blank"; new
+# links follow that convention. Set to False to leave the attribute off.
+TEMPLATE_LINK_TARGET_BLANK = True
+TEMPLATE_ARCHIVE_BASE_URL = "https://www.catholicprophecy.info"
+
+
+def add_template_archive_link(html, year, month):
+    """Put the link for <prefix><yy>.html into the empty cell for that
+    month/year in template.html's archive table.
+
+    Surgical: only the <br> inside the one empty cell is replaced, so the
+    cell's own whitespace and every other byte of the file stay as they
+    were. Returns (new_html, action) with action one of
+      'added' | 'already-present' | 'other-link:<url>' | 'no-slot'."""
+    prefix, abbr = MONTHS[month]
+    yy = f"{year % 100:02d}"
+    fname = f"{prefix}{yy}.html"
+
+    # Already linked (any scheme/host)?
+    if re.search(r'href="[^"]*/' + re.escape(fname) + r'"', html):
+        return html, "already-present"
+
+    row_idx = ((month - 1) % 6) + 1           # Jan/Jul → row 1 … Jun/Dec → row 6
+    side = 0 if month <= 6 else 1             # left cell = Jan-Jun, right = Jul-Dec
+
+    for tm in re.finditer(r'<table\b[^>]*>.*?</table>', html, re.DOTALL):
+        table = tm.group(0)
+        rows = list(re.finditer(r'<tr\b[^>]*>.*?</tr>', table, re.DOTALL))
+        if len(rows) < 7:
+            continue
+        # The header row says which cell column each year starts at.
+        hdr = list(re.finditer(r'<td\b[^>]*>.*?</td>', rows[0].group(0), re.DOTALL))
+        year_col = None
+        for k, c in enumerate(hdr):
+            if re.sub(r'<[^>]+>|&nbsp;|\s', '', c.group(0)) == str(year):
+                year_col = k
+                break
+        if year_col is None:
+            continue
+
+        cells = list(re.finditer(r'<td\b[^>]*>.*?</td>',
+                                 rows[row_idx].group(0), re.DOTALL))
+        target = year_col + side
+        if target >= len(cells):
+            return html, "no-slot"
+        cell = cells[target]
+        raw = cell.group(0)
+
+        visible = re.sub(r'<br\s*/?>', '', raw)
+        visible = re.sub(r'<[^>]+>|&nbsp;', '', visible).strip()
+        if visible:
+            existing = re.search(r'href="([^"]+)"', raw)
+            return html, (f"other-link:{existing.group(1)}" if existing
+                          else "already-present")
+        if not re.search(r'<br\s*/?>', raw):
+            return html, "no-slot"
+
+        tgt = ' target="_blank"' if TEMPLATE_LINK_TARGET_BLANK else ''
+        markup = (f'<b><span style="font-size:smaller;"><a{tgt} '
+                  f'href="{TEMPLATE_ARCHIVE_BASE_URL}/{fname}">{abbr}</a></span></b>')
+        new_raw = re.sub(r'<br\s*/?>', lambda _m: markup, raw, count=1)
+        start = tm.start() + rows[row_idx].start() + cell.start()
+        end = start + len(raw)
+        return html[:start] + new_raw + html[end:], "added"
+
+    return html, "no-slot"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
