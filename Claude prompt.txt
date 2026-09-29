@@ -1,0 +1,3 @@
+Compare news.html and news4.html section by section. List every discrepancy you find — anything missing, duplicated, malformed, or incorrectly formatted in the conversion. Do not modify any files yet, just report what you find.
+
+Now fix tribulation_times_convert.py so it resolves the discrepancies you just listed, so future conversions from news.html to news4.html don't have these problems.  Also revise news2.html and news4.html to include the corrections.
