@@ -735,6 +735,25 @@ def _preceding_section_heading(small_tag):
 
 
 def get_source_for_link(link):
+    """Source label for `link` (see _get_source_label). A parenthetical note
+    between a <small> label and its link -- e.g. "<small>VIA X</small>
+    (Fr. Ugochukwu Ugwoke, ISch): <a>Title</a>" -- names the post's author
+    and is kept after the label in its original case and normal weight;
+    the label walk itself deliberately skips "(...)" text."""
+    source = _get_source_label(link)
+    prev = link.previous_sibling
+    if (source and link.find_parent("small") is None
+            and isinstance(prev, NavigableString)):
+        m = re.fullmatch(r'\s*(\([^()]{1,80}\))\s*:?\s*',
+                         str(prev).replace("\xa0", " "))
+        if m and m.group(1) not in source:
+            note = " ".join(m.group(1).split())
+            source = (f'{source} <span style="text-transform:none;'
+                      f'font-weight:normal;letter-spacing:0;">{note}</span>')
+    return source
+
+
+def _get_source_label(link):
     """
     Extract the source label for a news link using pattern-aware logic.
 
@@ -1302,6 +1321,11 @@ def _looks_like_new_item_anchor(a, current_url=""):
     return False
 
 
+# Placeholder for a lone source <br> kept as a real line break inside one
+# excerpt paragraph (see _p_subheading_fragments); _inline_html_text renders it.
+_BR_MARK = object()
+
+
 def _inline_html_text(node):
     """Flatten a tag's contents to text the way get_text() does, but (a)
     preserve <em>/<i>/<strong>/<b>/<u> as their own tags instead of
@@ -1311,6 +1335,8 @@ def _inline_html_text(node):
     grow a spurious space before trailing punctuation the way
     get_text(separator=" ") does -- each NavigableString already carries
     whatever whitespace was actually present around it in the source."""
+    if node is _BR_MARK:
+        return "<br> "
     if isinstance(node, NavigableString):
         return str(node)
     name = getattr(node, "name", None)
@@ -1408,6 +1434,11 @@ def _p_subheading_fragments(p_tag, label_marker=None):
             continue
         if isinstance(child, NavigableString) and not str(child).strip():
             continue  # whitespace between <br> tags doesn't break the run
+        if br_run == 1 and current:
+            # A lone <br> between two runs of content is a real line break
+            # in the source (e.g. "...include:<br>1. Receiving...") -- keep
+            # it rather than gluing the two lines together with no space.
+            current.append(_BR_MARK)
         br_run = 0
         current.append(child)
     if current:
@@ -1499,6 +1530,38 @@ def _p_subheading_fragments(p_tag, label_marker=None):
     return fragments
 
 
+def _leads_with_small_label(container, inner_a):
+    """True if `container` (a <p>/<span>) opens with a <small> ALL-CAPS
+    source label followed only by a short note before `inner_a`, e.g.
+    "<small>VIA X</small> (Fr. Ugochukwu Ugwoke, ISch): <a>Title</a>".
+    That mixed-case note makes the lead-in fail the plain ALL-CAPS label
+    test, so without this the next item's whole paragraph was absorbed
+    into the preceding item as if the link were inline prose. A <br>
+    between label and link (e.g. a multi-turn interview whose link only
+    appears in a later turn) means it's not a label+headline shape."""
+    label, rest = None, ""
+    for c in container.children:
+        if c is inner_a or (hasattr(c, "descendants")
+                            and any(d is inner_a for d in c.descendants)):
+            break
+        if label is None:
+            if isinstance(c, NavigableString) and not str(c).strip(" \n\t\xa0"):
+                continue
+            if getattr(c, "name", None) != "small":
+                return False
+            label = " ".join(c.get_text(" ", strip=True).split()).strip(" :")
+            letters = "".join(ch for ch in label if ch.isalpha())
+            if not (label and letters and len(label) <= 40
+                    and letters == letters.upper()
+                    and '"' not in label and '“' not in label):
+                return False
+            continue
+        if getattr(c, "name", None) == "br":
+            return False
+        rest += str(c) if isinstance(c, NavigableString) else c.get_text(" ", strip=True)
+    return bool(label) and len(" ".join(rest.split())) <= 80
+
+
 def _span_precedes_new_item(span_or_font, current_url=""):
     """True if this <span>/<font> node is itself the header of a new,
     separately-labeled news item (e.g. <span><small><span bold>MORE</span>
@@ -1564,9 +1627,13 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
     # break, matching the convention used elsewhere for cluster/paragraph
     # detection); _fresh_para forces the next add() to start a new entry
     # rather than merge into the previous one (used right after a paragraph
-    # break, and after labels/subheadings).
+    # break, and after labels/subheadings). _pending_br marks a lone <br>
+    # since the last add(), so the next merged fragment keeps that line
+    # break (e.g. a prayer's title line above its text) instead of being
+    # run together with a space.
     _br_run = [0]
     _fresh_para = [True]
+    _pending_br = [False]
 
     # Phrases that signal end of content — stop collecting if we see these
     STOP_PHRASES = (
@@ -1653,9 +1720,10 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
             # mid-sentence (e.g. italic emphasis, or a hyperlinked word near
             # the end of a sentence) that would otherwise fragment one
             # source sentence into several disconnected excerpt entries.
-            _sep = "" if _punct_only else " "
+            _sep = "" if _punct_only else ("<br> " if _pending_br[0] else " ")
             excerpts[-1] = (excerpts[-1].rstrip() + _sep + t).strip()
         _fresh_para[0] = is_label
+        _pending_br[0] = False
 
     def walk_siblings(start_node):
         """Returns True if we stopped because we hit a source label."""
@@ -1676,6 +1744,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                     _br_run[0] = 0
                 if name == "br":
                     _br_run[0] += 1
+                    _pending_br[0] = True
                     if _br_run[0] >= 2:
                         _fresh_para[0] = True
                 elif name == "small":
@@ -1798,9 +1867,10 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                 _leading += (str(_c) if isinstance(_c, NavigableString)
                                              else _c.get_text(" ", strip=True))
                             _leading = _leading.strip()
-                            _looks_like_label = (_leading and len(_leading) < 40
+                            _looks_like_label = ((_leading and len(_leading) < 40
                                     and _leading == _leading.upper()
                                     and any(ch.isalpha() for ch in _leading))
+                                    or _leads_with_small_label(nxt, inner_a))
                             if not _leading or _looks_like_label:
                                 return True  # next news item — stop
                             _inline_ids_here = {id(a) for a in nxt.find_all("a", href=True)}
@@ -1940,6 +2010,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                     _br_run[0] = 0
                                 if n.name == "br":
                                     _br_run[0] += 1
+                                    _pending_br[0] = True
                                     if _br_run[0] >= 2:
                                         _fresh_para[0] = True
                                 elif n.name == "big":
@@ -2062,9 +2133,10 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                                 _leading += (str(_c) if isinstance(_c, NavigableString)
                                                              else _c.get_text(" ", strip=True))
                                             _leading = _leading.strip()
-                                            _looks_like_label = (_leading and len(_leading) < 40
+                                            _looks_like_label = ((_leading and len(_leading) < 40
                                                     and _leading == _leading.upper()
                                                     and any(ch.isalpha() for ch in _leading))
+                                                    or _leads_with_small_label(n, inner_a))
                                             if not _leading or _looks_like_label:
                                                 break  # next news item starts here
                                     # Stop at bold source-label span (no link inside, but IS a label).
@@ -2151,6 +2223,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                                 if lbl2: add(lbl2)
                                             elif child.name == "br":
                                                 _br_run[0] += 1
+                                                _pending_br[0] = True
                                                 if _br_run[0] >= 2:
                                                     _fresh_para[0] = True
                                             elif child.name == "a":
@@ -2226,9 +2299,10 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                                 _leading2 += (str(_c2) if isinstance(_c2, NavigableString)
                                                               else _c2.get_text(" ", strip=True))
                                             _leading2 = _leading2.strip()
-                                            _looks_like_label2 = (_leading2 and len(_leading2) < 40
+                                            _looks_like_label2 = ((_leading2 and len(_leading2) < 40
                                                     and _leading2 == _leading2.upper()
                                                     and any(ch.isalpha() for ch in _leading2))
+                                                    or _leads_with_small_label(n, _inner_a))
                                             if not _leading2 or _looks_like_label2:
                                                 break  # next news item — stop
                                             _inline_ids_here2 = {id(a) for a in n.find_all("a", href=True)}
@@ -2400,6 +2474,12 @@ def _capture_leading_turns(link):
         return [], ""
     *earlier, last = turns
     lead_in = last[1] if last else ""
+    if (not earlier and last[0]
+            and re.fullmatch(r'\([^()]{1,80}\)', " ".join(lead_in.split()))):
+        # "<small>VIA X</small> (Author): <a>Title</a>" -- the parenthetical
+        # is part of the source label (get_source_for_link keeps it there),
+        # not a sentence the link sits inside; the link stays the headline.
+        return [], ""
     fragments = []
     for lbl, txt in earlier:
         if lbl:
