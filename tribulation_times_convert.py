@@ -131,6 +131,32 @@ def esc_href(url):
     return (url or "").replace("&", "&amp;")
 
 
+# Query parameters that a browser's bot-check page appends to a URL and
+# that end up pasted into news.html along with it (e.g. Reddit's
+# "?solution=...&js_challenge=1&jsc_token=...&jsc_orig_r="). They're tied to
+# one browser session and can make the link fail for anyone else.
+_SESSION_JUNK_PARAMS = {"solution", "js_challenge", "jsc_token", "jsc_orig_r"}
+
+
+def strip_session_junk_params(html):
+    """Remove _SESSION_JUNK_PARAMS from every href in the raw HTML, dropping
+    the "?" entirely when nothing else is left. Runs on the raw source
+    before parsing so all later link matching sees the same cleaned URL."""
+    def _clean(m):
+        href = m.group(2)
+        if "?" not in href:
+            return m.group(0)
+        base, _, query = href.partition("?")
+        query, hash_sep, frag = query.partition("#")
+        parts = [q for q in re.split(r'&amp;|&', query) if q]
+        kept = [q for q in parts if q.split("=", 1)[0] not in _SESSION_JUNK_PARAMS]
+        if len(kept) == len(parts):
+            return m.group(0)
+        new = base + ("?" + "&amp;".join(kept) if kept else "") + hash_sep + frag
+        return f'{m.group(1)}{new}{m.group(3)}'
+    return re.sub(r'(href=")([^"]*)(")', _clean, html)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # ENTRY EXTRACTION
 # ══════════════════════════════════════════════════════════════════════════
@@ -1181,7 +1207,8 @@ def get_following_features(link, soup, doc_order=None, inline_ids=None, excluded
                         # Bold-italic (sub)heading paragraph with no body
                         # text of its own — render as a section label and
                         # keep sweeping past it rather than stopping.
-                        post_list_text.append("__LABEL__" + t)
+                        post_list_text.append(
+                            "__LABEL__" + (f"<em>{t}</em>" if _inline_style_flags(sm)[1] else t))
                     elif nxt.find("a", href=True):
                         # Preserve any bare/parenthetical citation link(s)
                         # as clickable text instead of flattening them away.
@@ -1326,6 +1353,27 @@ def _looks_like_new_item_anchor(a, current_url=""):
 _BR_MARK = object()
 
 
+def _is_soft_wrap_br(before, after):
+    """True when a lone source <br> between two text runs is just the
+    WYSIWYG editor's hard line-wrap in the middle of a phrase rather than an
+    intended line break -- e.g. '(Diary<br>      741)', a citation split
+    inside its own parentheses. Kept deliberately narrow so real breaks
+    (a title line above a prayer, "...include:<br>1. Receiving...", or a
+    new sentence after "sin.<br>I am writing...") stay intact:
+
+    - the text so far has an unclosed "(" and the next run continues it
+      without starting a new parenthetical, or
+    - the text so far ends in a lowercase letter (no punctuation) and the
+      next run starts with a lowercase letter (mid-sentence wrap)."""
+    b = re.sub(r'<[^>]+>', '', before or "").rstrip()
+    a = re.sub(r'<[^>]+>', '', after or "").lstrip()
+    if not b or not a:
+        return False
+    if b.count("(") > b.count(")") and b[-1].isalnum() and a[0] not in "(":
+        return True
+    return b[-1].islower() and a[0].islower()
+
+
 def _inline_html_text(node):
     """Flatten a tag's contents to text the way get_text() does, but (a)
     preserve <em>/<i>/<strong>/<b>/<u> as their own tags instead of
@@ -1371,23 +1419,17 @@ def _style_flags(el):
     return bold, italic
 
 
-def _small_subheading_fragment(sm):
-    """Render a mid-article <small> subheading as an excerpt label fragment.
-
-    Usually these are bold(+italic) and get the crimson <strong> label
-    treatment. But a <small> that is italic with no bold anywhere on it,
-    inside it, or on its enclosing inline wrappers (e.g. a sermon's italic
-    sub-title under its headline) must not be promoted to a bold uppercase
-    heading -- keep it italic and normal-weight, as in the source."""
-    lbl = " ".join(sm.get_text(" ", strip=True).split())
-    lbl = _ZERO_WIDTH_RE.sub("", lbl).strip()
-    if not lbl:
-        return ""
+def _inline_style_flags(el):
+    """(bold, italic) for a subheading element: its own style, any
+    descendant's, and its enclosing inline wrappers' up to the nearest
+    <p> (or other block container)."""
     bold = italic = False
-    for el in [sm] + sm.find_all(True):
-        b, i = _style_flags(el)
+    if not hasattr(el, "find_all"):
+        return bold, italic
+    for e in [el] + el.find_all(True):
+        b, i = _style_flags(e)
         bold, italic = bold or b, italic or i
-    for anc in sm.parents:
+    for anc in el.parents:
         if getattr(anc, "name", None) in (None, "[document]", "body", "html",
                                           "td", "li", "div", "blockquote"):
             break
@@ -1395,9 +1437,38 @@ def _small_subheading_fragment(sm):
         bold, italic = bold or b, italic or i
         if anc.name == "p":
             break
+    return bold, italic
+
+
+def _label_or_subhead(label, el):
+    """Excerpt fragment for a short bold <small> line inside an article.
+    Bold-italic (the source's in-article section-heading shape, e.g.
+    "Indescribable Sufferings") -> a <strong><em> subheading that keeps its
+    source case. Bold-only (speaker/"Q:"-style labels) -> the crimson
+    uppercase label fragment, unchanged."""
+    if _inline_style_flags(el)[1]:
+        return f'<strong><em>{label}</em></strong>'
+    return (f'<strong style="font-family:Verdana,Arial,sans-serif;'
+            f'font-size:10px;letter-spacing:2px;text-transform:uppercase;'
+            f'color:#7a1c1c;">{label}</strong>')
+
+
+def _small_subheading_fragment(sm):
+    """Render a mid-article <small> subheading as an excerpt label fragment.
+
+    Usually these are bold(+italic) and get the <strong> subheading
+    treatment. But a <small> that is italic with no bold anywhere on it,
+    inside it, or on its enclosing inline wrappers (e.g. a sermon's italic
+    sub-title under its headline) must not be promoted to a bold
+    heading -- keep it italic and normal-weight, as in the source."""
+    lbl = " ".join(sm.get_text(" ", strip=True).split())
+    lbl = _ZERO_WIDTH_RE.sub("", lbl).strip()
+    if not lbl:
+        return ""
+    bold, italic = _inline_style_flags(sm)
     if italic and not bold:
         return f'{ITALIC_SUBHEAD_OPEN}{lbl}</em>'
-    return f'<strong>{lbl}</strong>'
+    return f'<strong><em>{lbl}</em></strong>' if italic else f'<strong>{lbl}</strong>'
 
 
 def _p_subheading_fragments(p_tag, label_marker=None):
@@ -1438,7 +1509,14 @@ def _p_subheading_fragments(p_tag, label_marker=None):
             # A lone <br> between two runs of content is a real line break
             # in the source (e.g. "...include:<br>1. Receiving...") -- keep
             # it rather than gluing the two lines together with no space.
-            current.append(_BR_MARK)
+            # Exception: an editor soft-wrap mid-phrase (see
+            # _is_soft_wrap_br) becomes a plain space instead.
+            _before = "".join(_inline_html_text(c) for c in current)
+            _after = _inline_html_text(child)
+            if _is_soft_wrap_br(_before, _after):
+                current.append(NavigableString(" "))
+            else:
+                current.append(_BR_MARK)
         br_run = 0
         current.append(child)
     if current:
@@ -1470,12 +1548,13 @@ def _p_subheading_fragments(p_tag, label_marker=None):
                     and '"' not in label and '“' not in label)
                     or plain_small_heading):
                 if label_marker is not None:
-                    fragments.append(f'{label_marker}{label}')
+                    # Keep a bold-italic heading's italics through the
+                    # marker so h_subhead() can render it as a subheading.
+                    _lbl = (f'<em>{label}</em>' if _inline_style_flags(sm)[1]
+                            else label)
+                    fragments.append(f'{label_marker}{_lbl}')
                 else:
-                    fragments.append(
-                        f'<strong style="font-family:Verdana,Arial,sans-serif;'
-                        f'font-size:10px;letter-spacing:2px;text-transform:uppercase;'
-                        f'color:#7a1c1c;">{label}</strong>')
+                    fragments.append(_label_or_subhead(label, sm))
                 continue
         if len(seg) > 1 and getattr(seg[0], "name", None) == "small":
             # A short bold (non-italic) label glued to the START of a
@@ -1720,7 +1799,9 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
             # mid-sentence (e.g. italic emphasis, or a hyperlinked word near
             # the end of a sentence) that would otherwise fragment one
             # source sentence into several disconnected excerpt entries.
-            _sep = "" if _punct_only else ("<br> " if _pending_br[0] else " ")
+            _sep = "" if _punct_only else (
+                "<br> " if _pending_br[0] and not _is_soft_wrap_br(excerpts[-1], t)
+                else " ")
             excerpts[-1] = (excerpts[-1].rstrip() + _sep + t).strip()
         _fresh_para[0] = is_label
         _pending_br[0] = False
@@ -1807,9 +1888,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                     if (subheading_text and len(subheading_text) <= 80
                             and '"' not in subheading_text
                             and '“' not in subheading_text):
-                        add(f'<strong style="font-family:Verdana,Arial,sans-serif;' +
-                            f'font-size:10px;letter-spacing:2px;text-transform:uppercase;' +
-                            f'color:#7a1c1c;">{subheading_text}</strong>')
+                        add(_label_or_subhead(subheading_text, nxt))
                     pass  # skip lists (handled by get_following_features)
                 elif name == "a":
                     # An <a> that wraps a bold/small source label is the header
@@ -2169,9 +2248,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                                 strong = child.find("strong")
                                                 sm = child.find("small")
                                                 if strong and sm and len(pt) <= 80 and '"' not in pt:
-                                                    add(f'<strong style="font-family:Verdana,Arial,sans-serif;'
-                                                        f'font-size:10px;letter-spacing:2px;text-transform:uppercase;'
-                                                        f'color:#7a1c1c;">{pt}</strong>')
+                                                    add(_label_or_subhead(pt, sm))
                                                 else:
                                                     add(pt)
                                         elif hasattr(child, "name"):
@@ -2989,6 +3066,25 @@ def get_news_items(block, _skip_urls=None):
             if all(" ".join(re.sub(r'<[^>]+>', '', e).split()).strip() in _small_text
                    for e in excerpts):
                 body_bold = body_small = True
+        # A link that is just the last word(s) OF the source label itself,
+        # inside the same bold run and followed by the label's colon -- e.g.
+        # "<span bold>EXCERPT <a>LITURGY</a>: God our merciful Father...
+        # </span>". The whole "EXCERPT LITURGY" is the label; render it as
+        # one crimson label with only the linked word clickable, rather
+        # than splitting off "LITURGY" as if it were an article headline.
+        _lt_plain = " ".join(link_text.split()).strip(" :")
+        _prev_s, _next_s = link.previous_sibling, link.next_sibling
+        if (source and url and _lt_plain and len(_lt_plain) <= 40
+                and _lt_plain == _lt_plain.upper()
+                and isinstance(_prev_s, NavigableString)
+                and " ".join(str(_prev_s).split()).strip(" :\xa0") == source
+                and isinstance(_next_s, NavigableString)
+                and str(_next_s).lstrip(" \xa0\n").startswith(":")):
+            source = (f'{source} <a href="{esc_href(url)}" target="_blank" '
+                      f'style="color:{C["crimson"]};text-decoration:none;">'
+                      f'{_lt_plain}</a>')
+            link_text = ""
+            url = ""
         # X/Twitter links become news items only when explicitly labeled
         # (e.g. "VIDEO CATHOLIC VOTE:"); bare/embedded social links are skipped.
         if ("x.com/" in url or "twitter.com/" in url) and not source:
@@ -3134,6 +3230,26 @@ def h_label(text):
     )
 
 
+def h_subhead(frag):
+    """In-article subheading div. A bold-italic source subheading (fragment
+    carries <em>) keeps its source case and italics in dark ink, so it
+    reads as a heading within the article rather than as another crimson
+    uppercase source label (EWTN, REDDIT...). Bold-only labels (speaker
+    names, "Q:") keep the crimson uppercase label style."""
+    if "<em" in frag:
+        text = re.sub(r'<[^>]+>', '', frag).strip()
+        return (
+            f'<div style="font-family:Verdana,Arial,sans-serif;font-size:14px;'
+            f'font-weight:bold;font-style:italic;color:{C["ink"]};'
+            f'line-height:1.5;margin:14px 0 4px 0;">{text}</div>'
+        )
+    return (
+        f'<div style="font-family:Verdana,Arial,sans-serif;font-size:10px;'
+        f'font-weight:bold;letter-spacing:1px;text-transform:uppercase;'
+        f'color:{C["crimson"]};margin:10px 0 4px 0;">{frag}</div>'
+    )
+
+
 def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=False,
            body_small=False):
     """Build one news item: source label + linked title + excerpts + ✦ feature table.
@@ -3169,12 +3285,8 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
     ex_html = ""
     for para in pre_excerpts:
         if para.startswith("<strong") and para.endswith("</strong>"):
-            # Section subheading label — render as crimson uppercase div
-            ex_html += (
-                f'<div style="font-family:Verdana,Arial,sans-serif;font-size:10px;'
-                f'font-weight:bold;letter-spacing:1px;text-transform:uppercase;'
-                f'color:{C["crimson"]};margin:10px 0 4px 0;">{para}</div>'
-            )
+            # Section subheading / label (see h_subhead)
+            ex_html += h_subhead(para)
         else:
             ex_html += (
                 f'<p style="font-family:Verdana,Arial,sans-serif;font-size:{_size};'
@@ -3184,11 +3296,7 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
     concluding_html = ""
     for para in post_excerpts:
         if para.startswith("<strong") and para.endswith("</strong>"):
-            concluding_html += (
-                f'<div style="font-family:Verdana,Arial,sans-serif;font-size:10px;'
-                f'font-weight:bold;letter-spacing:1px;text-transform:uppercase;'
-                f'color:{C["crimson"]};margin:10px 0 4px 0;">{para}</div>'
-            )
+            concluding_html += h_subhead(para)
         else:
             concluding_html += (
                 f'<p style="font-family:Verdana,Arial,sans-serif;font-size:{_size};'
@@ -3252,11 +3360,7 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
                 # continuing prose (e.g. "Overall Framing") — same styling
                 # as the section-header divs above, not a plain paragraph.
                 p_label = p[len("__LABEL__"):]
-                post_list_html += (
-                    f'<div style="font-family:Verdana,Arial,sans-serif;font-size:10px;'
-                    f'font-weight:bold;letter-spacing:1px;text-transform:uppercase;'
-                    f'color:{C["crimson"]};margin:10px 0 4px 0;">{p_label}</div>'
-                )
+                post_list_html += h_subhead(p_label)
             else:
                 post_list_html += (
                     f'<p style="font-family:Verdana,Arial,sans-serif;font-size:15px;'
@@ -4639,6 +4743,7 @@ def main():
     except UnicodeDecodeError:
         raw = _data.decode("cp1252", errors="replace")
         print("  Note: news.html is not valid UTF-8 — decoded as Windows-1252.")
+    raw = strip_session_junk_params(raw)
 
     # Faithful Bible-in-a-Year button: read the visible link from the source
     # instead of relying on the hardcoded month constants above.
