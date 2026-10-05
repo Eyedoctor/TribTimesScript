@@ -157,6 +157,36 @@ def strip_session_junk_params(html):
     return re.sub(r'(href=")([^"]*)(")', _clean, html)
 
 
+def esc_bare_amp(html):
+    """Escape any "&" that doesn't already start an entity (&amp;, &nbsp;,
+    &#10022; ...). BeautifulSoup decodes "&amp;" in scraped text to a bare
+    "&" (e.g. headline "The Rosary &amp; The History..."), so generated
+    entry HTML must re-escape it, just as esc_href() does for URLs."""
+    return re.sub(r'&(?!#?[A-Za-z0-9]+;)', '&amp;', html)
+
+
+# Text segments (never tags, scripts or styles) where a sentence runs into
+# the next with no space -- "idolatry.The rosary", "Luke 1:42.Finally" --
+# typically from paragraph breaks lost when an article was pasted in. Requires
+# two lowercase letters (or a digit) before the period, so abbreviations like
+# "St.Pius" or "e.g.The" are left alone.
+_MISSING_SPACE_RE = re.compile(r'(?:(?<=[a-z][a-z])|(?<=\d))\.(?=[A-Z][a-z])')
+
+
+def fix_missing_sentence_spaces(html):
+    """Insert the missing space in run-together sentences in the raw
+    news.html text. Returns (fixed_html, list_of_fixed_snippets)."""
+    fixed = []
+    parts = re.split(r'(<script\b.*?</script>|<style\b.*?</style>|<[^>]+>)',
+                     html, flags=re.DOTALL | re.IGNORECASE)
+    for i in range(0, len(parts), 2):   # even indices are text, odd are tags
+        seg = parts[i]
+        for m in _MISSING_SPACE_RE.finditer(seg):
+            fixed.append(" ".join(seg[max(0, m.start() - 15):m.end() + 15].split()))
+        parts[i] = _MISSING_SPACE_RE.sub('. ', seg)
+    return "".join(parts), fixed
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # ENTRY EXTRACTION
 # ══════════════════════════════════════════════════════════════════════════
@@ -373,6 +403,14 @@ def get_collect(block):
                 _p_style = (_p_anc.get("style") or "").replace(" ", "")
                 if "font-weight:bold" in _p_style:
                     span = sm
+        if not span:
+            # Or the bold style sits on the <a> itself, with the quote body in
+            # a sibling bold span (e.g. <small><a style="font-weight: bold;">
+            # BLESSED BARTOLO LONGO</a><span style="font-weight: bold;">:
+            # "quoted text"</span></small>) -- same stand-in as above.
+            _a_style = (a.get("style") or "").replace(" ", "")
+            if "font-weight:bold" in _a_style and a.parent is sm:
+                span = sm
         if not span:
             continue
         href = a.get("href", "")
@@ -2802,6 +2840,15 @@ def get_news_items(block, _skip_urls=None):
                 if (_after_t.startswith('\u201c') or '"' in _after_t[:5]
                         or (_after_t.startswith(':') and _has_quote)):
                     continue  # this is a collect/quote block, not a news item
+            elif (_after is not None and getattr(_after, "name", None) == "span"
+                    and "font-weight" in (_after.get("style") or "")):
+                # Bold label <a> followed by a sibling bold span holding
+                # ": "quoted text"" (the label isn't wrapped in the span).
+                # Mirrors get_collect's bold-<a> fallback.
+                _after_t = _after.get_text(" ", strip=True)
+                if (_after_t.startswith(":")
+                        and ('"' in _after_t or '“' in _after_t)):
+                    continue  # handled by get_collect
             elif _after is None:
                 # The label <a> may be the last child of its own wrapping
                 # bold <span>, with the quote body starting in a *sibling*
@@ -4128,7 +4175,7 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
     out += h_ladder(get_ladder(block), _step_num, _step_title)
 
     # Safety net: restore anything the heuristics dropped
-    return repair_entry(entry, out)
+    return esc_bare_amp(repair_entry(entry, out))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -4744,6 +4791,11 @@ def main():
         raw = _data.decode("cp1252", errors="replace")
         print("  Note: news.html is not valid UTF-8 — decoded as Windows-1252.")
     raw = strip_session_junk_params(raw)
+    raw, _space_fixes = fix_missing_sentence_spaces(raw)
+    if _space_fixes:
+        print("  Added a missing space after a period (consider fixing news.html too):")
+        for s in _space_fixes:
+            print(f"    • ...{s}...")
 
     # Faithful Bible-in-a-Year button: read the visible link from the source
     # instead of relying on the hardcoded month constants above.
