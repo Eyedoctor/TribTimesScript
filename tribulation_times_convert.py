@@ -84,6 +84,9 @@ LINE_GIF         = "http://www.catholicprophecy.info/line.gif"
 BIBLE_YEAR_URL   = "https://bibleinayearonline.com/may-oyb/?version=63&startmmdd=0101"
 BIBLE_YEAR_LABEL = "May Readings"
 GA_ACCOUNT       = "G-BDP3WZGYC4"
+# Re-derived from news.html's own <link rel="canonical"> on every run (see
+# main()); this constant is only the fallback.
+CANONICAL_URL    = "https://www.catholicprophecy.info/news.html"
 
 # Link destinations that should never become news items
 SKIP_URL_FRAGMENTS = [
@@ -325,8 +328,18 @@ def get_scripture(block):
     else:
         end = len(block)
     region = block[start:end]
+    # &nbsp; padding after a reference (e.g. "(Rev 11:19)&nbsp;") is just
+    # spacing -- h_scripture() adds its own after the reference, so keeping
+    # the entity would double it up.
+    region = re.sub(r'&nbsp;|&#160;', ' ', region)
+    # A <br><br> run between two verses is a deliberate blank line in the
+    # source; mark it (\x01) so it survives the tag strip below.
+    region = re.sub(r'(?:<br[^>]*>\s*){2,}', ' \x01 ', region)
     txt = re.sub(r'<[^>]+>', ' ', region)
-    txt = re.sub(r'[\s\u00a0]+', ' ', txt).strip()
+    txt = re.sub(r'[\s\u00a0]+', ' ', txt).strip(' \x01')
+
+    def _tidy(s):
+        return re.sub(r'\s*\x01[\s\x01]*', '<br><br>', s.strip(' \x01')).strip()
 
     ref_re = re.compile(
         r'\(\s*(?:[1-3]\s*)?[A-Za-z][A-Za-z]{0,5}\.?\s+\d+:\d+[\d:,\-\s]*\)'
@@ -337,20 +350,24 @@ def get_scripture(block):
         ref = mm.group(0).strip("() ").strip()
         b0 = mm.end()
         b1 = matches[i + 1].start() if i + 1 < len(matches) else len(txt)
-        body = txt[b0:b1].strip()
+        raw_body = txt[b0:b1]
+        body = _tidy(raw_body)
         if body:
-            verses.append((ref, body))
+            # gap = whether a blank line separated this verse from the next
+            verses.append((ref, body, raw_body.rstrip().endswith('\x01')))
 
     if not verses:
         ref_m = re.match(r'\(([^)]+)\)\s*(.+)$', txt, re.DOTALL)
         if ref_m:
-            return ref_m.group(1).strip(), ref_m.group(2).strip()
-        return ("", txt) if txt else ("", "")
+            return ref_m.group(1).strip(), _tidy(ref_m.group(2))
+        return ("", _tidy(txt)) if txt else ("", "")
 
-    first_ref, first_body = verses[0]
+    first_ref, first_body, _ = verses[0]
     if len(verses) == 1:
         return first_ref, first_body
-    rest = "".join(f'<br>({r})&nbsp; {b}' for r, b in verses[1:])
+    rest = "".join(
+        f'{"<br><br>" if verses[i - 1][2] else "<br>"}({r})&nbsp; {b}'
+        for i, (r, b, _) in enumerate(verses) if i > 0)
     return first_ref, first_body + rest
 
 
@@ -3029,7 +3046,23 @@ def get_news_items(block, _skip_urls=None):
         # Venerable Pius XII..."), that trailing colon was just body
         # punctuation introducing the excerpt, not part of the title --
         # strip it back off so it doesn't render as "Frank Rega:".
-        if source and link_text.endswith(":"):
+        # Exception: a headline that is itself a full sentence ending its
+        # own paragraph with the colon (e.g. "<a>...these are the popes who
+        # promoted it</a>:</p>", introducing a list below) -- there the
+        # colon is the headline's own punctuation and is kept.
+        def _colon_ends_paragraph(a):
+            nxt = a.next_sibling
+            if not (isinstance(nxt, NavigableString) and str(nxt).strip() == ":"):
+                return False
+            for sib in nxt.next_siblings:
+                if isinstance(sib, NavigableString):
+                    if str(sib).strip(" \t\r\n\xa0"):
+                        return False
+                elif getattr(sib, "name", None) != "br":
+                    return False
+            return True
+        if (source and link_text.endswith(":")
+                and not (len(link_text.split()) >= 4 and _colon_ends_paragraph(link))):
             link_text = link_text[:-1]
         excerpts      = get_following_excerpts(link, _ladder_text=_block_ladder,
                                                   _current_url=url, _consumed=seen)
@@ -3311,7 +3344,10 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
     """
     _weight = "font-weight:bold;" if body_bold else ""
     _size = "13px" if body_small else "15px"
-    all_excerpts = [p for p in (excerpts or []) if p.strip(": \u00a0")]
+    # The excerpt walkers join a kept line break as "<br> "; drop that space
+    # so the markup matches the source ("Pius IX:<br>Ineffabilis Deus").
+    all_excerpts = [re.sub(r'<br>[ \t\r\n]+', '<br>', p)
+                    for p in (excerpts or []) if p.strip(": \u00a0")]
 
     _last_is_label = bool(all_excerpts) and (
         (all_excerpts[-1].startswith("<strong") and all_excerpts[-1].endswith("</strong>"))
@@ -4301,12 +4337,14 @@ def build_news4(entries):
             blocks.append(h_divider())
 
     main_html = "\n".join(blocks)
+    canonical = (f'\n  <link rel="canonical" href="{esc_href(CANONICAL_URL)}">'
+                 if CANONICAL_URL else "")
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">{canonical}
   <meta http-equiv="refresh" content="600; URL={ARCHIVES_URL}">
   <meta name="MSSmartTagsPreventParsing" content="TRUE">
   <meta name="description" content="This daily updated web page examines current events
@@ -4807,6 +4845,13 @@ def main():
         BIBLE_YEAR_URL   = _bm.group(1).replace("&amp;", "&")
         BIBLE_YEAR_LABEL = _bm.group(2).capitalize() + " Readings"
         print(f"  Bible-in-a-Year button: {BIBLE_YEAR_LABEL}")
+
+    # Carry news.html's canonical URL through to news4.html (which goes live
+    # as news.html), rather than silently dropping it.
+    global CANONICAL_URL
+    _cm = re.search(r'<link[^>]+rel="canonical"[^>]*href="([^"]+)"', raw)
+    if _cm:
+        CANONICAL_URL = _cm.group(1).replace("&amp;", "&")
 
     print("Extracting entries ...")
     entries = extract_entries(raw)
