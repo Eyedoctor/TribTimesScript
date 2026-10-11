@@ -101,6 +101,10 @@ INJECT_MARKER = "<!-- !!NEW_ENTRY_INJECT_POINT!! -->"
 
 C = COLORS  # shorthand
 
+# An article's own scene-break divider line ("***", "* * *", "~~~"), kept
+# as its own paragraph rather than dropped as a too-short fragment.
+_SECTION_BREAK_RE = re.compile(r'^(?:[*~]\s*){3,}$')
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # HELPERS
@@ -1826,6 +1830,15 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
             t = t.lstrip(":;,  ")
         if not t:
             return
+        # A scene-break line ("***", "* * *") is the author's own section
+        # divider inside an article -- always its own paragraph, exempt from
+        # the short-fragment and duplicate filters below (an article often
+        # has several identical ones).
+        if _SECTION_BREAK_RE.match(t):
+            excerpts.append(t)
+            _fresh_para[0] = True
+            _pending_br[0] = False
+            return
         # HTML label strings (subheadings) are positional — allow duplicates, no length filter
         is_label = _is_label_fragment(t)
         _punct_only = bool(t) and all(ch in ".,:;!?\"'’”)»" for ch in t)
@@ -3152,8 +3165,21 @@ def get_news_items(block, _skip_urls=None):
         # </span>". The whole "EXCERPT LITURGY" is the label; render it as
         # one crimson label with only the linked word clickable, rather
         # than splitting off "LITURGY" as if it were an article headline.
+        # The colon may also sit just OUTSIDE the label's <small> when the
+        # link is that <small>'s last child (e.g. "<small bold>VIA <a>THE
+        # MOYNIHAN LETTERS</a></small>: Letter #29...: Pope Leo's Surgery<br>").
         _lt_plain = " ".join(link_text.split()).strip(" :")
         _prev_s, _next_s = link.previous_sibling, link.next_sibling
+        _label_box = link
+        while (_next_s is None or (isinstance(_next_s, NavigableString)
+                                   and not str(_next_s).strip(" \xa0\n"))):
+            if _next_s is not None:
+                _next_s = _next_s.next_sibling
+                continue
+            _label_box = _label_box.parent
+            if _label_box is None or _label_box.name not in ("small", "b", "span"):
+                break
+            _next_s = _label_box.next_sibling
         if (source and url and _lt_plain and len(_lt_plain) <= 40
                 and _lt_plain == _lt_plain.upper()
                 and isinstance(_prev_s, NavigableString)
@@ -3165,6 +3191,24 @@ def get_news_items(block, _skip_urls=None):
                       f'{_lt_plain}</a>')
             link_text = ""
             url = ""
+            # A short title line right after the label's colon, ending at a
+            # <br> with the article body following (e.g. "Letter #29, 2026,
+            # Sunday, October 11: Pope Leo's Surgery"), is the item's
+            # headline -- render it as one (unlinked; the link now lives on
+            # the label) instead of as the first body paragraph.
+            _title = " ".join(str(_next_s).split()).lstrip(": ").strip()
+            _after_title = _next_s.next_sibling
+            while (isinstance(_after_title, NavigableString)
+                   and not str(_after_title).strip(" \xa0\n")):
+                _after_title = _after_title.next_sibling
+            _ends_line = (_after_title is None
+                          or getattr(_after_title, "name", None) == "br")
+            if (_title and len(_title) <= 120 and _ends_line
+                    and not _title.endswith((".", "!", "?", '"', "”"))
+                    and len(excerpts) > 1
+                    and " ".join(excerpts[0].split()) == _title):
+                link_text = _title
+                excerpts = excerpts[1:]
         # X/Twitter links become news items only when explicitly labeled
         # (e.g. "VIDEO CATHOLIC VOTE:"); bare/embedded social links are skipped.
         if ("x.com/" in url or "twitter.com/" in url) and not source:
@@ -3476,6 +3520,16 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
         # no source, so this never renders a broken empty-href headline.
         label_html = h_label(source)
         head_html = ""
+    elif not url:
+        # Headline with no link of its own -- the item's link already sits
+        # on the source label (e.g. "VIA <a>THE MOYNIHAN LETTERS</a>" over
+        # the title "Letter #29...: Pope Leo's Surgery"). Same headline
+        # styling, in ink rather than link color, so it doesn't look clickable.
+        label_html = h_label(source)
+        head_html = (
+            f'<div style="font-family:Verdana,Arial,sans-serif;font-size:15px;'
+            f'font-weight:bold;line-height:1.4;color:{C["ink"]};">{link_text}</div>'
+        )
     else:
         label_html = h_label(source)
         head_html = (
