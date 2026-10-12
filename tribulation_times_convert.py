@@ -180,18 +180,38 @@ def esc_bare_amp(html):
 _MISSING_SPACE_RE = re.compile(r'(?:(?<=[a-z][a-z])|(?<=\d))\.(?=[A-Z][a-z])')
 
 
-def fix_missing_sentence_spaces(html):
-    """Insert the missing space in run-together sentences in the raw
-    news.html text. Returns (fixed_html, list_of_fixed_snippets)."""
+def _fix_text_segments(html, pattern, repl):
+    """Apply pattern -> repl to the text segments of html (never tags,
+    scripts or styles). Returns (fixed_html, list_of_fixed_snippets)."""
     fixed = []
     parts = re.split(r'(<script\b.*?</script>|<style\b.*?</style>|<[^>]+>)',
                      html, flags=re.DOTALL | re.IGNORECASE)
     for i in range(0, len(parts), 2):   # even indices are text, odd are tags
         seg = parts[i]
-        for m in _MISSING_SPACE_RE.finditer(seg):
+        for m in pattern.finditer(seg):
             fixed.append(" ".join(seg[max(0, m.start() - 15):m.end() + 15].split()))
-        parts[i] = _MISSING_SPACE_RE.sub('. ', seg)
+        parts[i] = pattern.sub(repl, seg)
     return "".join(parts), fixed
+
+
+def fix_missing_sentence_spaces(html):
+    """Insert the missing space in run-together sentences in the raw
+    news.html text. Returns (fixed_html, list_of_fixed_snippets)."""
+    return _fix_text_segments(html, _MISSING_SPACE_RE, '. ')
+
+
+# An opening straight quote with a stray space after it, following the end
+# of the previous sentence -- 'he said. " I thank you' -> 'he said. "I thank
+# you'. Requires sentence punctuation + whitespace before the quote and a
+# capital letter after, so a closing quote (which follows a word) is never
+# touched.
+_STRAY_QUOTE_SPACE_RE = re.compile(r'(?<=[.!?:,]\s)" (?=[A-Z])')
+
+
+def fix_stray_quote_spaces(html):
+    """Remove the stray space after an opening quote in the raw news.html
+    text. Returns (fixed_html, list_of_fixed_snippets)."""
+    return _fix_text_segments(html, _STRAY_QUOTE_SPACE_RE, '"')
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -2153,7 +2173,12 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                     # list (get_following_features renders it
                                     # too) — stop instead of collecting.
                                     break
-                                if n.name != "br":
+                                # A <span> is transparent to the <br> count: its
+                                # own children reset it once real text appears.
+                                # Resetting on entry lost the paragraph break in
+                                # the editor's "text</span><br><span><br>Next"
+                                # shape (one <br> outside, one leading inside).
+                                if n.name not in ("br", "span"):
                                     _br_run[0] = 0
                                 if n.name == "br":
                                     _br_run[0] += 1
@@ -4887,6 +4912,11 @@ def main():
     if _space_fixes:
         print("  Added a missing space after a period (consider fixing news.html too):")
         for s in _space_fixes:
+            print(f"    • ...{s}...")
+    raw, _quote_fixes = fix_stray_quote_spaces(raw)
+    if _quote_fixes:
+        print("  Removed a stray space after an opening quote (consider fixing news.html too):")
+        for s in _quote_fixes:
             print(f"    • ...{s}...")
 
     # Faithful Bible-in-a-Year button: read the visible link from the source
