@@ -1894,6 +1894,12 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
         _fresh_para[0] = is_label
         _pending_br[0] = False
 
+    def _body_text(s):
+        # Drop only a LEADING separator colon (": body..." after a headline).
+        # A trailing colon is the sentence's own punctuation introducing what
+        # follows (e.g. "...the following update on ... recovery:") -- keep it.
+        return str(s).strip(" \n\xa0").lstrip(":").strip(" \n\xa0")
+
     def walk_siblings(start_node):
         """Returns True if we stopped because we hit a source label."""
         nxt = start_node
@@ -1901,7 +1907,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
             if nxt is None:
                 return False
             if isinstance(nxt, NavigableString):
-                t = str(nxt).strip(" :\n\xa0")
+                t = _body_text(nxt)
                 if t:
                     _br_run[0] = 0
                     if _is_next_item_label(nxt):
@@ -1977,7 +1983,13 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                             and '"' not in subheading_text
                             and '“' not in subheading_text):
                         add(_label_or_subhead(subheading_text, nxt))
-                    pass  # skip lists (handled by get_following_features)
+                    elif subheading_text:
+                        # Too long / quoted to be a subheading: it's the
+                        # item's own body set in small type (e.g. "<a><small>
+                        # <b>The Prayer of Teresa of Ávila</b></small></a>:
+                        # <small><b>"Let nothing disturb you..."</b></small>").
+                        # Previously dropped outright.
+                        add(subheading_text)
                 elif name == "a":
                     # An <a> that wraps a bold/small source label is the header
                     # of the NEXT item (inverted shape, e.g.
@@ -2157,7 +2169,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                         for _ in range(80):
                             if n is None: break
                             if isinstance(n, NavigableString):
-                                t = str(n).strip(" :\n\xa0")
+                                t = _body_text(n)
                                 if t:
                                     _br_run[0] = 0
                                     if _is_next_item_label(n):
@@ -2327,7 +2339,7 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                     _span_stop = False
                                     for child in n.children:
                                         if isinstance(child, NavigableString):
-                                            t = str(child).strip(" :\n\xa0")
+                                            t = _body_text(child)
                                             if t:
                                                 _br_run[0] = 0
                                                 add(t)
@@ -3099,8 +3111,18 @@ def get_news_items(block, _skip_urls=None):
                 elif getattr(sib, "name", None) != "br":
                     return False
             return True
-        if (source and link_text.endswith(":")
-                and not (len(link_text.split()) >= 4 and _colon_ends_paragraph(link))):
+        # Same for an unlabeled MIXED-case headline whose colon introduces
+        # body text after it (e.g. "<a>The Prayer of Teresa of Ávila</a>:
+        # "Let nothing disturb you..."") -- an ALL-CAPS self-labeling anchor
+        # keeps it here (the self-labeling path below strips it itself).
+        _lt_head = link_text.rstrip(":").strip()
+        _lt_head = _lt_head.split(":", 1)[0].strip() if ":" in _lt_head else _lt_head
+        _mixed_headline = _lt_head != _lt_head.upper()
+        if link_text.endswith(":") and (
+                (source and not (len(link_text.split()) >= 4
+                                 and _colon_ends_paragraph(link)))
+                or (not source and _mixed_headline
+                    and not _colon_ends_paragraph(link))):
             link_text = link_text[:-1]
         excerpts      = get_following_excerpts(link, _ladder_text=_block_ladder,
                                                   _current_url=url, _consumed=seen)
@@ -3183,6 +3205,23 @@ def get_news_items(block, _skip_urls=None):
             _small_text = " ".join(_body_small_anc.get_text(" ", strip=True).split())
             if all(" ".join(re.sub(r'<[^>]+>', '', e).split()).strip() in _small_text
                    for e in excerpts):
+                body_bold = body_small = True
+        # Same emphasis when the body is instead a fully-bold <small> SIBLING
+        # following the link on the same line (e.g. "<a><small><b>The Prayer
+        # of Teresa of Ávila</b></small></a>: <small><b>"Let nothing
+        # disturb you..."</b></small>").
+        if not body_bold and excerpts:
+            _sib_smalls = []
+            for _sib in link.next_siblings:
+                _nm = getattr(_sib, "name", None)
+                if _nm in ("br", "p"):
+                    break
+                if _nm == "small" and _small_block_is_bold(_sib):
+                    _sib_smalls.append(" ".join(_sib.get_text(" ", strip=True).split()))
+            _sib_text = " ".join(_sib_smalls)
+            if _sib_text and all(
+                    " ".join(re.sub(r'<[^>]+>', '', e).split()).strip() in _sib_text
+                    for e in excerpts):
                 body_bold = body_small = True
         # A link that is just the last word(s) OF the source label itself,
         # inside the same bold run and followed by the label's colon -- e.g.
