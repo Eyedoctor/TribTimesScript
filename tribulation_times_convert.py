@@ -2520,6 +2520,13 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                     # and renders on its own — stop instead
                                     # of also absorbing it here as a plain
                                     # trailing paragraph (duplicate text).
+                                    # Only a "<p><small>LABEL</small></p>"
+                                    # heading qualifies (mirrors the <p>
+                                    # check in get_following_features); a
+                                    # plain prose lead-in such as "...refers
+                                    # to systems that:" is never picked up
+                                    # there, so it stays a body paragraph
+                                    # here instead of being lost.
                                     _peek, _steps2 = n.next_sibling, 0
                                     _precedes_list = False
                                     while _peek is not None and _steps2 < 5:
@@ -2533,7 +2540,8 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                                             break
                                         _steps2 += 1
                                         _peek = _peek.next_sibling
-                                    if _precedes_list:
+                                    if (_precedes_list and n.find("small") is not None
+                                            and n.find("a") is None):
                                         break
                                     t = " ".join(n.get_text(" ", strip=True).split())
                                     WALK_STOP = ("Ladder of Divine Ascent", "Prayer request",
@@ -3476,11 +3484,14 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
 
     _last_is_label = bool(all_excerpts) and (
         (all_excerpts[-1].startswith("<strong") and all_excerpts[-1].endswith("</strong>"))
-        or all_excerpts[-1].startswith(ITALIC_SUBHEAD_OPEN))
+        or all_excerpts[-1].startswith(ITALIC_SUBHEAD_OPEN)
+        # A lead-in ending in ":" ("...refers to systems that:") introduces
+        # the list itself, so it must stay directly above it.
+        or re.sub(r"<[^>]+>", "", all_excerpts[-1]).rstrip().endswith(":"))
     if feature_items and len(all_excerpts) > 1 and len(all_excerpts) <= 6 and not _last_is_label:
         # Short item with a feature list: excerpts before list, last as concluding para.
-        # A trailing subheading label is never eligible for this move — it belongs
-        # right where it appeared in the source flow, not after an unrelated bullet list.
+        # A trailing subheading label or colon lead-in is never eligible for this move —
+        # it belongs right where it appeared in the source flow, above the bullet list.
         pre_excerpts  = all_excerpts[:-1]
         post_excerpts = all_excerpts[-1:]
     else:
