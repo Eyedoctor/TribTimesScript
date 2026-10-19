@@ -1491,6 +1491,15 @@ def _is_label_fragment(t):
     return t.startswith("<strong") or t.startswith(ITALIC_SUBHEAD_OPEN)
 
 
+def _is_colon_only_wrapper(node):
+    """True for an inline tag whose entire text is a lone ":" -- the editor's
+    way of un-bolding a headline's trailing colon, e.g.
+    "<a>Angelus ...</a><span style="font-weight: normal;">:</span>"."""
+    return (getattr(node, "name", None) in ("span", "font", "b", "i", "em", "strong", "big", "small")
+            and node.find("a") is None
+            and node.get_text(strip=True) == ":")
+
+
 def _style_flags(el):
     st = (el.get("style") or "").replace(" ", "").lower() if hasattr(el, "get") else ""
     bold = "font-weight:bold" in st or getattr(el, "name", None) in ("b", "strong")
@@ -1862,7 +1871,13 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
         # HTML label strings (subheadings) are positional — allow duplicates, no length filter
         is_label = _is_label_fragment(t)
         _punct_only = bool(t) and all(ch in ".,:;!?\"'’”)»" for ch in t)
-        if not is_label and len(t) <= 8:
+        # A short but complete multi-word line that starts its own source
+        # paragraph (e.g. "He said:" or "Go now." between <br><br> breaks)
+        # is real prose, not a stray tag fragment -- keep it.
+        _short_sentence = (_fresh_para[0] and len(t.split()) >= 2
+                           and re.match(r"[A-Z“\"]", t) is not None
+                           and t[-1] in ".:!?”\"")
+        if not is_label and len(t) <= 8 and not _short_sentence:
             # Short trailing punctuation (e.g. a closing "." after a
             # citation link split across tags) still belongs to the
             # sentence in progress — let it merge rather than vanish.
@@ -2884,8 +2899,9 @@ def get_news_items(block, _skip_urls=None):
         # If the link is immediately followed by a colon sibling, include it
         # e.g. <a>POPE LEO XIV</a>: "Through..." → link_text = "POPE LEO XIV:"
         _nxt = link.next_sibling
-        if (_nxt and isinstance(_nxt, NavigableString)
-                and str(_nxt).strip().startswith(":")):
+        if ((_nxt and isinstance(_nxt, NavigableString)
+                and str(_nxt).strip().startswith(":"))
+                or _is_colon_only_wrapper(_nxt)):
             link_text = link_text.rstrip(":") + ":"
 
         # Skip links that are papal/saint quote blocks (handled by get_collect)
@@ -3102,7 +3118,8 @@ def get_news_items(block, _skip_urls=None):
         # colon is the headline's own punctuation and is kept.
         def _colon_ends_paragraph(a):
             nxt = a.next_sibling
-            if not (isinstance(nxt, NavigableString) and str(nxt).strip() == ":"):
+            if not ((isinstance(nxt, NavigableString) and str(nxt).strip() == ":")
+                    or _is_colon_only_wrapper(nxt)):
                 return False
             for sib in nxt.next_siblings:
                 if isinstance(sib, NavigableString):
@@ -3470,7 +3487,10 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
         # Long-form summary (>6 excerpts) or no feature list: excerpts flow as
         # paragraphs; any feature list still renders as its own bullet table
         # (below), after them, in source order — never flattened into prose.
-        pre_excerpts  = all_excerpts[:40]
+        # No paragraph cap: a long article split into many one-line
+        # paragraphs (e.g. a 50-line <br><br> list) must render in full,
+        # not be silently cut off mid-article.
+        pre_excerpts  = list(all_excerpts)
         post_excerpts = []
 
     ex_html = ""
@@ -3753,6 +3773,12 @@ _FID_BOILER = (
     "mailto:","groups.google.com","catholicprophecy.info/links",
     "catholicprophecy.info/index","catholicprophecy.info/Catholic",
     "magisterium.com/widgets","docsbot.ai",
+)
+# Body-text passages fidelity_check() ignores because footer() re-renders
+# them in its own wording.
+_FID_TEXT_BOILER = (
+    "Prayer request", "Just ask Ron Smith", "archive can be found",
+    "READ THE BIBLE IN ONE YEAR",
 )
 
 
@@ -4915,16 +4941,49 @@ def fidelity_check(entry, out_html):
         seen_l.add(t); lbl_total += 1
         if t not in out_norm:
             missing_labels.append(t[:70])
+    # Body text: every source sentence-length text run should appear in the
+    # output's visible text. Catches prose silently dropped or cut off
+    # mid-article, which the link/label counts above can't see.
+    def _vis(s):
+        return " ".join(s.replace("\xa0", " ").split())
+    out_soup = BeautifulSoup(out_html, "html.parser")
+    for t in out_soup(["script", "style"]):
+        t.decompose()
+    out_text = _vis(out_soup.get_text(" "))
+    out_text_nosp = out_text.replace(" ", "")
+    missing_text, txt_total = [], 0
+    for s in soup.find_all(string=True):
+        if s.parent is not None and s.parent.name in ("script", "style"):
+            continue
+        # A leading ": " is the headline/label separator, which the
+        # converter intentionally drops from the start of the body text;
+        # a trailing one may be dropped from a label like "(Name):".
+        t = _vis(str(s)).lstrip(":;, ").rstrip(":")
+        if len(t.split()) < 4:
+            continue
+        # Skip text the page template deliberately re-renders in its own
+        # wording: the date heading, the Ladder step line, and the footer.
+        if ('="' in t or entry["date"] in t or re.search(r"\bStep\s*\d+", t)
+                or any(b in t for b in _FID_TEXT_BOILER)):
+            continue
+        txt_total += 1
+        # Compare ignoring spaces: the converter legitimately re-spaces text
+        # around tags (e.g. "(Joh 16:33)&nbsp; These things...").
+        if t.replace(" ", "") not in out_text_nosp:
+            missing_text.append(t[:70])
     print(f"\nFidelity check ({entry['date']}):")
     print(f"  Links:  {total - len(missing_links)}/{total} carried over")
     print(f"  Labels: {lbl_total - len(missing_labels)}/{lbl_total} carried over")
-    if not missing_links and not missing_labels:
+    print(f"  Text:   {txt_total - len(missing_text)}/{txt_total} passages carried over")
+    if not missing_links and not missing_labels and not missing_text:
         print("  All content accounted for \u2713")
         return True
     for txt, href in missing_links:
         print(f"  \u26a0 MISSING ITEM : {txt}\n                   {href}")
     for t in missing_labels:
         print(f"  \u26a0 MISSING LABEL: {t}")
+    for t in missing_text:
+        print(f"  \u26a0 MISSING TEXT : {t}")
     print("  \u26a0 Review the page before uploading.")
     return False
 
