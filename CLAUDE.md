@@ -50,7 +50,7 @@ py -3 tribulation_times_convert.py
 
 ## Settings vs. scraped content
 
-The `SETTINGS` block at the top of the file (`SUBSCRIBE_URL`, `ARCHIVES_URL`, `LADDER_URL`, `GA_ACCOUNT`, `COLORS`, etc.) holds the **modernized site's own fixed values**, which in some cases deliberately differ from what's hardcoded in the raw `news.html` (e.g. `ARCHIVES_URL` points at `tribtimes.com`, not `catholicprophecy.info`; `LADDER_URL` is `http://`, not `https://`). Don't "fix" these to match `news.html` under the assumption it's a scraping bug — that's intentional site configuration and should only change if the user asks. The one exception is `BIBLE_YEAR_URL`/`BIBLE_YEAR_LABEL`, which `main()` deliberately re-derives from the *current* month's link in `news.html` on every run (the hardcoded constant is only a fallback).
+The `SETTINGS` block at the top of the file (`SUBSCRIBE_URL`, `ARCHIVES_URL`, `LADDER_URL`, `GA_ACCOUNT`, `COLORS`, etc.) holds the **modernized site's own fixed values**, which in some cases deliberately differ from what's hardcoded in the raw `news.html` (e.g. `ARCHIVES_URL` points at `tribtimes.com`, not `catholicprophecy.info`; `LADDER_URL` is `https://`, while `news.html` links the Ladder page over `http://`). Don't "fix" these to match `news.html` under the assumption it's a scraping bug — that's intentional site configuration and should only change if the user asks. The one exception is `BIBLE_YEAR_URL`/`BIBLE_YEAR_LABEL`, which `main()` deliberately re-derives from the *current* month's link in `news.html` on every run (the hardcoded constant is only a fallback).
 
 ## Typo correction
 

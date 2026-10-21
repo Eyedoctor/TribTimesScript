@@ -754,11 +754,14 @@ def get_ladder(block):
     # splits the excerpt's trailing punctuation into its own near-empty
     # <font>.</font> sibling, and stopping at the first </font> would cut
     # the sentence off before that final period.
+    # The paragraph number may sit on its own line ("2. <br><br>A lie
+    # is..."), so <br>s directly after the number are skipped rather than
+    # ending the excerpt at just "2.".
     m = re.search(
         r'Ladder\s+of\s+Divine\s+Ascent[^<]*(?:<[^>]+>\s*)*'
         r'(?:excerpt|Excerpt)[^<]*(?:<[^>]+>\s*)*'
         r'(?:Step\s*\d+[^<]*)?(?:<[^>]+>\s*)*'
-        r'([0-9]+\.\s+.+?)(?:<br|</p>|</div>|<hr|$)',
+        r'([0-9]+\.(?:\s|<br\s*/?>)+.+?)(?:<br|</p>|</div>|<hr|$)',
         block, re.DOTALL
     )
     if m:
@@ -2802,21 +2805,37 @@ def get_news_items(block, _skip_urls=None):
     for _sm in soup.find_all("small"):
         if _sm.find("a", href=True):
             continue  # label smalls with their own link are normal items
+        # Bold usually sits on a <span> inside the <small>, but the heading
+        # can also be a bare <small> as the sole content of a bold <p>
+        # (e.g. '<p style="font-weight: bold;"><small>RELATED</small></p>'
+        # followed by the <ul>).
         _sp = _sm.find("span", style=True)
-        if not _sp:
-            continue
-        _st = (_sp.get("style") or "").replace(" ", "")
+        _bold_p = None
+        if _sp:
+            _st = (_sp.get("style") or "").replace(" ", "")
+        else:
+            _par = _sm.parent
+            if (_par is None or _par.name != "p"
+                    or _par.get_text(" ", strip=True) != _sm.get_text(" ", strip=True)):
+                continue
+            _st = (_par.get("style") or "").replace(" ", "")
+            # Bold+italic <p><small> is a cluster subheading (restyled
+            # inside the article body), not a headline-list heading.
+            if "font-style:italic" in _st:
+                continue
+            _bold_p = _par
         if "font-weight:bold" not in _st:
             continue
         _heading = _sm.get_text(" ", strip=True).strip(" :")
         if not _heading or len(_heading) > 60:
             continue
         # The heading's <small> is often the sole real content of its own
-        # wrapping <span> (e.g. "<span><small>...</small><br></span>"), in
-        # which case the <ul> is a sibling of that wrapping <span>, not of
-        # the <small> itself — check both.
+        # wrapping <span>/<p> (e.g. "<span><small>...</small><br></span>"),
+        # in which case the <ul> is a sibling of that wrapper, not of the
+        # <small> itself — check both.
         _list_tag = _next_list_tag(_sm.next_sibling)
-        if _list_tag is None and _sm.parent is not None and _sm.parent.name == "span":
+        if _list_tag is None and _sm.parent is not None and (
+                _sm.parent.name == "span" or _sm.parent is _bold_p):
             _list_tag = _next_list_tag(_sm.parent.next_sibling)
         if _list_tag is None or id(_list_tag) in _headline_owned_lists:
             continue
@@ -2826,7 +2845,8 @@ def get_news_items(block, _skip_urls=None):
             if _li_a is None:
                 continue
             _href = _li_a.get("href", "").strip()
-            _txt  = clean(_li_a)
+            # Collapse the editor's hard line-wraps inside the anchor text.
+            _txt  = " ".join(clean(_li_a).split())
             if _href and _txt and not skip_url(_href):
                 _li_links.append((_href, _txt))
         if not _li_links or _li_links[0][0] in headline_member:
