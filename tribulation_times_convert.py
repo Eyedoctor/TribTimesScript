@@ -32,7 +32,7 @@ from pathlib import Path
 from datetime import datetime
 
 try:
-    from bs4 import BeautifulSoup, NavigableString
+    from bs4 import BeautifulSoup, Comment, NavigableString
 except ImportError:
     print("\nERROR: BeautifulSoup4 is not installed.")
     print("Please run:  pip install beautifulsoup4\n")
@@ -115,6 +115,24 @@ def clean(node):
     if isinstance(node, str):
         return node.strip()
     return node.get_text(" ", strip=True)
+
+
+def clean_inline(node):
+    """Like clean(), but joins the tag's text nodes exactly as they sit in the
+    source instead of with a forced space -- so a tag boundary inside running
+    text (e.g. <a><small>WATCH</small>: Title</a>) doesn't turn into a stray
+    space before the punctuation ("WATCH : Title"). <br> still counts as a
+    word break."""
+    if isinstance(node, str):
+        return " ".join(node.split())
+    parts = []
+    for el in node.descendants:
+        if isinstance(el, NavigableString):
+            if not isinstance(el, Comment):
+                parts.append(str(el))
+        elif el.name == "br":
+            parts.append(" ")
+    return " ".join("".join(parts).split())
 
 
 def skip_url(url):
@@ -571,6 +589,17 @@ def get_social_report(block):
             continue
         span = a.find_parent("span", style=lambda s: s and "font-weight" in (s or ""))
         if not span:
+            # Or the bold style sits on the <small> itself (or on an <a> that
+            # is its direct child), with the body trailing inside that same
+            # <small> (e.g. <small style="font-weight: bold;"><a href="x.com">
+            # VIA X BISHOP ROBERT BARRON</a>: body ...</small>) -- the <small>
+            # stands in for the bold span, same as in get_collect().
+            _sm_style = (sm.get("style") or "").replace(" ", "")
+            _a_style = (a.get("style") or "").replace(" ", "")
+            if a.parent is sm and ("font-weight:bold" in _sm_style
+                                   or "font-weight:bold" in _a_style):
+                span = sm
+        if not span:
             continue
         href = a.get("href", "")
         if not ("x.com/" in href or "twitter.com/" in href):
@@ -593,7 +622,11 @@ def get_social_report(block):
         label = a.get_text(strip=True)
         if not label or len(label) > 40:
             continue
-        if _is_quote_label(label.upper()):      # Church-figure quote -> get_collect
+        # Church-figure quote -> get_collect. Only defer when get_collect
+        # actually claims this link, though: an honorific label whose body is
+        # unquoted prose (e.g. "VIA X BISHOP ROBERT BARRON: Friends, ...") is
+        # rejected there and would otherwise fall through to a plain news card.
+        if _is_quote_label(label.upper()) and get_collect(block)[1] == href:
             continue
         parts = []
         for child in span.children:
@@ -2893,7 +2926,7 @@ def get_news_items(block, _skip_urls=None):
         if id(link) in _inline_a_ids:
             continue
 
-        link_text = clean(link)
+        link_text = clean_inline(link)
         if not link_text:
             continue
         if len(link_text) < 5:
@@ -4150,7 +4183,10 @@ def _entry_content_map(entry):
         if id(a) in inline_ids:
             continue
         href = (a.get("href") or "").replace("&amp;", "&").strip()
-        text = " ".join(a.get_text(" ", strip=True).split())
+        # Same join as get_news_items' headline text (clean_inline), so a tag
+        # boundary before punctuation (<small>WATCH</small>: ...) doesn't
+        # make the rendered title look missing.
+        text = clean_inline(a)
         if not href or not text or len(text) < 5 or any(b in href for b in _FID_BOILER):
             continue
         if (href, text) in seen:
@@ -4952,7 +4988,10 @@ def fidelity_check(entry, out_html):
         if id(a) in _inline_ids:
             continue
         href = (a.get("href") or "").replace("&amp;", "&").strip()
-        text = " ".join(a.get_text(" ", strip=True).split())
+        # Same join as get_news_items' headline text (clean_inline), so a tag
+        # boundary before punctuation (<small>WATCH</small>: ...) doesn't
+        # make the rendered title look missing.
+        text = clean_inline(a)
         if not href or not text or len(text) < 5 or any(b in href for b in _FID_BOILER):
             continue
         if (href, text) in seen:
