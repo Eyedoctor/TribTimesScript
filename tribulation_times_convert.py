@@ -232,6 +232,21 @@ def fix_stray_quote_spaces(html):
     return _fix_text_segments(html, _STRAY_QUOTE_SPACE_RE, '"')
 
 
+# Apostrophes typed as something other than the curly ’ the rest of the
+# bulletin uses: the modifier-letter apostrophe ʼ (U+02BC, usually pasted in
+# from a web article), a straight ' inside a word ("Church's", "don't"), or a
+# straight ' closing a plural possessive before the next word ("bishops'
+# conference"). A straight ' that could be an opening quote (before a word)
+# is never touched.
+_APOSTROPHE_RE = re.compile(r"ʼ|(?<=[A-Za-z])'(?=[A-Za-z])|(?<=s)'(?= [a-z])")
+
+
+def fix_apostrophes(html):
+    """Normalize apostrophes in the raw news.html text to the curly ’.
+    Returns (fixed_html, list_of_fixed_snippets)."""
+    return _fix_text_segments(html, _APOSTROPHE_RE, '’')
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # ENTRY EXTRACTION
 # ══════════════════════════════════════════════════════════════════════════
@@ -5086,6 +5101,9 @@ def main():
         print("  Removed a stray space after an opening quote (consider fixing news.html too):")
         for s in _quote_fixes:
             print(f"    • ...{s}...")
+    raw, _apos_fixes = fix_apostrophes(raw)
+    if _apos_fixes:
+        print(f"  Normalized {len(_apos_fixes)} apostrophe(s) to the curly ’.")
 
     # Faithful Bible-in-a-Year button: read the visible link from the source
     # instead of relying on the hardcoded month constants above.
