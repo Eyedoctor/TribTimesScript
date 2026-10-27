@@ -1679,9 +1679,13 @@ def _p_subheading_fragments(p_tag, label_marker=None):
             # heading, but a whole dedicated <p> styled bold+italic with
             # nothing but a short label in it (no link) is an unambiguous
             # section subheading even when its own title quotes someone's
-            # words.
+            # words. That same dedicated-<p> shape also gets a longer length
+            # allowance than the span-styled check, since an article's own
+            # sub-title is often a full sentence (e.g. "We cannot be
+            # indifferent to religious persecution, says bishop for Freedom
+            # of Religion and Belief", ~97 chars).
             plain_small_heading = (p_is_bold and not sp and label
-                                    and len(label) <= 80
+                                    and len(label) <= 160
                                     and sm.find("a", href=True) is None)
             if (("font-weight:bold" in sst and label and len(label) <= 80
                     and '"' not in label and '“' not in label)
