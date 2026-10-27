@@ -765,6 +765,21 @@ def get_unlinked_quote(block):
     return text, m.start()
 
 
+# Author lifespan in a byline, e.g. "François Coppée (1842–1908) - French poet".
+_LIFESPAN_RE = re.compile(r'\(\s*(?:c\.\s*)?\d{3,4}\s*[–—-]\s*(?:c\.\s*)?\d{3,4}\s*\)')
+
+
+def _is_byline(text):
+    """True when a get_unlinked_quote() hit is really the author byline
+    closing the preceding item's quoted text (a name + lifespan, or a
+    dash-led "— Name" line), not a quoted excerpt of its own -- so it
+    belongs inside that item's card, not in a separate pull-quote box."""
+    t = text.strip()
+    if len(t) > 160:
+        return False
+    return bool(_LIFESPAN_RE.search(t) or re.match(r'[—–-]\s*\w', t))
+
+
 _ZERO_WIDTH_RE = re.compile('[​‌‍⁠﻿]')
 
 
@@ -3536,7 +3551,7 @@ def h_subhead(frag):
 
 
 def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=False,
-           body_small=False):
+           body_small=False, attribution=""):
     """Build one news item: source label + linked title + excerpts + ✦ feature table.
     When feature_items exist and there are multiple excerpts, the last excerpt is
     treated as a concluding paragraph and rendered AFTER the bullet list.
@@ -3546,6 +3561,8 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
     Cardinal/Bishop citation) rather than a normal-weight news excerpt.
     body_small additionally renders the body at the smaller 13px size used
     for other small-bold source blocks (collect/social quote boxes).
+    attribution is a small bold-italic author byline closing the item's
+    quoted text (see _is_byline), rendered last inside the card.
     """
     _weight = "font-weight:bold;" if body_bold else ""
     _size = "13px" if body_small else "15px"
@@ -3706,12 +3723,20 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
             f'text-decoration:none;">{link_text}</a></div>'
         )
 
+    attr_html = ""
+    if attribution:
+        attr_html = (
+            f'<p style="font-family:Verdana,Arial,sans-serif;font-size:13px;'
+            f'font-weight:bold;font-style:italic;color:{C["ink_mid"]};'
+            f'line-height:1.5;margin:10px 0 0 0;">{attribution}</p>'
+        )
+
     return (
         f'<table border="0" cellpadding="0" cellspacing="0" width="100%"'
         f' style="margin-bottom:18px;padding-bottom:18px;'
         f'border-bottom:1px dashed {C["rule"]};">'
         f'<tr><td>{label_html}{head_html}'
-        f'{ex_html}{feat_html}{post_list_html}{concluding_html}</td></tr></table>\n'
+        f'{ex_html}{feat_html}{post_list_html}{concluding_html}{attr_html}</td></tr></table>\n'
     )
 
 def h_announcement(text):
@@ -4390,8 +4415,6 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
             if _uq_norm and _uq_norm in _norm_compare_text(_rendered):
                 uq_text, uq_pos = "", -1
                 break
-    uq_html = h_pull_quote(uq_text) if uq_text else ""
-
     # Document-order position of the collect quote / social post, so each
     # lands in the right place relative to the news items around it.
     def _src_pos(u):
@@ -4401,6 +4424,23 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
         if p == -1:
             p = block.find(u.replace("&", "&amp;"))
         return p if p != -1 else 10 ** 9
+
+    # An author byline (e.g. "François Coppée (1842–1908) - French poet")
+    # closing the preceding item's quoted poem/excerpt shares the
+    # bold-italic <small> shape; attach it to that item's card instead of
+    # rendering a free-standing pull-quote box after it.
+    if uq_text and uq_pos != -1 and _is_byline(uq_text):
+        _owner = None
+        for _it in news_items:
+            if _it.get("headline_links"):
+                continue
+            _p = _src_pos(_it.get("url", ""))
+            if _p < uq_pos and (_owner is None or _p >= _src_pos(_owner.get("url", ""))):
+                _owner = _it
+        if _owner is not None:
+            _owner["attribution"] = uq_text
+            uq_text, uq_pos = "", -1
+    uq_html = h_pull_quote(uq_text) if uq_text else ""
 
     _pending = []
     if collect_text:
@@ -4430,6 +4470,7 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
             item["feature_items"],
             item.get("body_bold", False),
             item.get("body_small", False),
+            item.get("attribution", ""),
         )
     # Anything still pending came after every news item (or there were none).
     while _pending_idx < len(_pending):
