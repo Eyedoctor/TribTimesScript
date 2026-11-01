@@ -5002,6 +5002,36 @@ def fix_year_index_tables(html):
     return fixed, changed
 
 
+def trim_lampline_spacer(html):
+    """Drop the empty-month ``<br><br>`` spacer above LAMPLINE.GIF once the
+    month has at least one entry.
+
+    prune_month.py leaves ``<br>\\n<br>`` between the INJECT_POINT marker and
+    the lampline so an empty month isn't flush against it. Once an entry sits
+    there, those two breaks just add a large gap between the entry's last
+    line and the lampline. prune_month.py restores the spacer at month end.
+    Returns (possibly modified html, True/False whether anything changed)."""
+    idx = html.find(INJECT_MARKER)
+    if idx < 0:
+        return html, False
+    lamp = html.upper().find("LAMPLINE.GIF", idx)
+    if lamp < 0:
+        return html, False
+    img_open = html.rfind("<img", idx, lamp)
+    if img_open < 0:
+        return html, False
+    region = html[idx:img_open]
+    if not re.search(r'text-decoration:\s*underline', region):
+        return html, False  # empty month: keep the spacer
+    m = re.search(r'(?:\s*<br\s*/?>){2}(\s*)$', region)
+    if not m:
+        return html, False
+    ws = re.search(r'[ \t]*$', m.group(1)).group(0)
+    nl = "\r\n" if "\r\n" in region else "\n"
+    start = idx + m.start()
+    return html[:start] + nl + ws + html[img_open:], True
+
+
 def prepend_to_archive(archive_path, entries):
     """Prepend new entries to the modern news2.html archive."""
     archive_path = Path(archive_path)
@@ -5038,6 +5068,10 @@ def prepend_to_archive(archive_path, entries):
     if chrome_attrs_fixed:
         print("  Moved obsolete table/td attributes in archive chrome to CSS.")
 
+    html, spacer_fixed = trim_lampline_spacer(html)
+    if spacer_fixed:
+        print("  Removed extra line breaks above the month lampline.")
+
     # RE-RUN PROTECTION: skip any entry whose dated heading is already in
     # the archive, so running the script twice cannot duplicate a day, and
     # a multi-day news.html only injects the days not yet archived.
@@ -5056,7 +5090,7 @@ def prepend_to_archive(archive_path, entries):
         # back, or the fix silently never reaches disk and re-appears in
         # every validator run.
         if (head_fixed or css_fixed or font_fixed or img_width_fixed
-                or year_table_fixed or chrome_attrs_fixed):
+                or year_table_fixed or chrome_attrs_fixed or spacer_fixed):
             tmp = archive_path.with_name(archive_path.name + ".tmp")
             tmp.write_text(html, encoding="utf-8")
             tmp.replace(archive_path)
@@ -5113,6 +5147,8 @@ def prepend_to_archive(archive_path, entries):
         updated = html[:idx] + new_block + html[idx:]
     else:
         updated = html[:idx] + INJECT_MARKER + "\n" + new_block + html[idx:]
+    # First entry of a new month: the empty-month spacer is now redundant.
+    updated, _ = trim_lampline_spacer(updated)
 
     # ATOMIC WRITE: write to a temp file first, then replace. A crash or
     # power loss mid-write can no longer leave a truncated news2.html.
