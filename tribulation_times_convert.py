@@ -4900,7 +4900,34 @@ _SHARED_ENTRY_TABLE_SIGNATURES = (
     "margin-bottom:18px;padding-bottom:18px;border-bottom:1px dashed",
     'cellspacing="0" cellpadding="4"',   # feature/bullet list inner table
     "border-collapse:collapse",          # year-index tables (handled below)
+    "margin-bottom:18px;padding-bottom:18px;border-bottom:none",  # strip_final_card_rule()
 )
+_LAST_CARD_STYLE = _SHARED_ENTRY_TABLE_SIGNATURES[-1]
+_CARD_DASHED_RE = re.compile(
+    r'margin-bottom:18px;padding-bottom:18px;border-bottom:1px dashed [^;"]*;?')
+
+
+def strip_final_card_rule(entry_html):
+    """Drop the dashed bottom rule from an entry's last card when that card is
+    the very last thing in the entry (no Ladder box etc. after it). Used for
+    the first entry of a month in news2.html, which sits directly on
+    LAMPLINE.GIF, so the dashed line would be a redundant second separator."""
+    opens = list(_CARD_DASHED_RE.finditer(entry_html))
+    if not opens:
+        return entry_html
+    m = opens[-1]
+    start = entry_html.rfind("<table", 0, m.start())
+    depth, pos = 0, start
+    for t in re.finditer(r'<(/?)table\b[^>]*>', entry_html[start:], re.I):
+        depth += -1 if t.group(1) else 1
+        if depth == 0:
+            pos = start + t.end()
+            break
+    else:
+        return entry_html
+    if entry_html[pos:].strip():
+        return entry_html          # something follows the card; keep the rule
+    return entry_html[:m.start()] + _LAST_CARD_STYLE + ";" + entry_html[m.end():]
 
 
 def fix_static_chrome_table_attrs(html):
@@ -5073,9 +5100,13 @@ def prepend_to_archive(archive_path, entries):
     # needs separating from an older entry already in the archive.
     parts = []
     for i, entry in enumerate(fresh):
-        parts.append(build_entry_html(entry, include_header=True))
+        entry_html = build_entry_html(entry, include_header=True)
         if i < len(fresh) - 1 or has_older:
+            parts.append(entry_html)
             parts.append(h_divider())
+        else:
+            # Sits directly on the lampline: no dashed rule under its last card.
+            parts.append(strip_final_card_rule(entry_html))
     new_block = "\n" + "\n".join(parts) + "\n"
 
     if INJECT_MARKER in html:
