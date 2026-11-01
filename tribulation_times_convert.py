@@ -5051,13 +5051,6 @@ def prepend_to_archive(archive_path, entries):
             except OSError:
                 pass
 
-    # Build what to inject (with headers, since archive needs date headings)
-    parts = []
-    for entry in fresh:
-        parts.append(build_entry_html(entry, include_header=True))
-    parts.append(h_divider())
-    new_block = "\n" + "\n".join(parts) + "\n"
-
     idx = find_inject_point(html)
     if idx == -1:
         print("  WARNING: Could not find injection point in archive.")
@@ -5065,6 +5058,25 @@ def prepend_to_archive(archive_path, entries):
         print(f"    {INJECT_MARKER}\n")
         print("  Then run the script again.")
         return False
+
+    # Does the archive already hold an older daily entry below the inject
+    # point (i.e. above the LAMPLINE.GIF month separator)? If not, this is
+    # the first entry of the month: it sits directly on the lampline, so a
+    # trailing line.gif divider would be redundant. Without a lampline to
+    # bound the search, assume older entries exist (keep the divider).
+    lamp = html.upper().find("LAMPLINE.GIF", idx)
+    has_older = (lamp < 0 or bool(re.search(
+        r'text-decoration:\s*underline', html[idx:lamp])))
+
+    # Build what to inject (with headers, since archive needs date headings).
+    # line.gif goes between entries, and after the last one only when it
+    # needs separating from an older entry already in the archive.
+    parts = []
+    for i, entry in enumerate(fresh):
+        parts.append(build_entry_html(entry, include_header=True))
+        if i < len(fresh) - 1 or has_older:
+            parts.append(h_divider())
+    new_block = "\n" + "\n".join(parts) + "\n"
 
     if INJECT_MARKER in html:
         updated = html[:idx] + new_block + html[idx:]
