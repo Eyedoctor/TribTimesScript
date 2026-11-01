@@ -954,7 +954,18 @@ def get_source_for_link(link):
     between a <small> label and its link -- e.g. "<small>VIA X</small>
     (Fr. Ugochukwu Ugwoke, ISch): <a>Title</a>" -- names the post's author
     and is kept after the label in its original case and normal weight;
-    the label walk itself deliberately skips "(...)" text."""
+    the label walk itself deliberately skips "(...)" text.
+
+    A headline whose label carries its own embedded link (e.g. "X (<a>
+    CATHOLIC VOTE</a>): <a>Voter Resources</a>") gets that whole label back
+    as HTML with the embedded link kept clickable -- the generic walk below
+    would strip the link's text and leave just "X" (or nothing)."""
+    _prev_small = link.find_previous("small")
+    if _prev_small is not None and link.find_parent("small") is None:
+        _emb = _prev_small.find("a", href=True)
+        _info = _label_embedded_link_info(_emb) if _emb is not None else None
+        if _info is not None and _info[1] is link:
+            return _embedded_label_html(_prev_small)
     source = _get_source_label(link)
     prev = link.previous_sibling
     if (source and link.find_parent("small") is None
@@ -966,6 +977,144 @@ def get_source_for_link(link):
             source = (f'{source} <span style="text-transform:none;'
                       f'font-weight:normal;letter-spacing:0;">{note}</span>')
     return source
+
+
+def _label_embedded_link_info(a):
+    """Detect a link that is PART OF a source label rather than a headline,
+    e.g.
+
+        <small><span bold>X (<a href="x.com/...">CATHOLIC VOTE</a>)</span></small>:
+        <a href="...">Voter Resources</a>
+
+    Here "CATHOLIC VOTE" links the label's named account; the item's real
+    headline is the NEXT link after the label's colon. Returns
+    (label_small, headline_a) when `a` is such an embedded label link,
+    else None. Required shape: `a` sits inside a <small>; the <small>'s
+    text around the link is a short ALL-CAPS prefix ending in "(" plus a
+    closing ")"; and only ":"/whitespace separates the <small> (or its
+    wrapping span/b) from the headline <a>."""
+    small = a.find_parent("small")
+    if small is None or len(small.find_all("a", href=True)) != 1:
+        return None
+    before, after, seen_a = [], [], False
+    for d in small.descendants:
+        if d is a:
+            seen_a = True
+            continue
+        if isinstance(d, NavigableString):
+            if any(p is a for p in d.parents):
+                continue
+            (after if seen_a else before).append(str(d))
+    pre = " ".join("".join(before).replace("\xa0", " ").split())
+    post = " ".join("".join(after).replace("\xa0", " ").split())
+    if not (pre.endswith("(") and post.rstrip(" :") == ")"):
+        return None
+    prefix = pre[:-1].strip()
+    letters = "".join(ch for ch in prefix if ch.isalpha())
+    if not (prefix and letters and len(prefix) <= 40 and letters == letters.upper()):
+        return None
+    # Walk forward from the label (or its bold/span wrapper) to the headline.
+    box = small
+    while box.next_sibling is None and box.parent is not None \
+            and box.parent.name in ("span", "b"):
+        box = box.parent
+    nxt, steps = box.next_sibling, 0
+    while nxt is not None and steps < 6:
+        steps += 1
+        if isinstance(nxt, NavigableString):
+            if str(nxt).strip(" :\xa0\n\t\r"):
+                return None
+        elif getattr(nxt, "name", None) == "a" and nxt.get("href"):
+            return (small, nxt) if nxt.get_text(strip=True) else None
+        else:
+            return None
+        nxt = nxt.next_sibling
+    return None
+
+
+def _is_bold_heading_anchor(a):
+    """True when <a> wraps its own bold text (bold <small>/<span>/<b> INSIDE
+    the anchor, covering all of its visible text) and stands alone on its
+    line -- nothing but whitespace from the anchor (climbing out of any
+    span/small/b/font/i wrapper with no further siblings) up to a <br> or
+    the end of its block. e.g.
+        <span><a href="..."><small><span style="font-weight: bold;
+        font-style: italic;">THE MIDTERMS</span></small></a><br></span>
+    Such an anchor is a section heading over the paragraphs that follow,
+    i.e. a self-labeling source label, not an ordinary headline."""
+    text = " ".join(a.get_text(" ", strip=True).split())
+    if not text:
+        return False
+    bold = False
+    for d in a.find_all(True):
+        st = (d.get("style") or "").replace(" ", "").lower()
+        if (d.name in ("b", "strong") or "font-weight:bold" in st) and \
+                " ".join(d.get_text(" ", strip=True).split()) == text:
+            bold = True
+            break
+    if not bold:
+        return False
+    # Nothing but whitespace before the anchor on its line ...
+    box = a
+    while True:
+        prev = box.previous_sibling
+        while isinstance(prev, NavigableString) and not str(prev).strip(" \xa0\n\t\r"):
+            prev = prev.previous_sibling
+        if prev is None and box.parent is not None and \
+                box.parent.name in ("span", "small", "b", "font", "i", "em"):
+            box = box.parent
+            continue
+        if prev is not None and getattr(prev, "name", None) not in _LINE_BREAKERS:
+            return False
+        break
+    # ... and nothing but whitespace after it, up to a <br> / end of block.
+    box = a
+    while True:
+        nxt = box.next_sibling
+        while isinstance(nxt, NavigableString) and not str(nxt).strip(" \xa0\n\t\r"):
+            nxt = nxt.next_sibling
+        if nxt is None and box.parent is not None and \
+                box.parent.name in ("span", "small", "b", "font", "i", "em"):
+            box = box.parent
+            continue
+        return nxt is None or getattr(nxt, "name", None) in _LINE_BREAKERS
+
+
+# Tags that end the line an inline element sits on.
+_LINE_BREAKERS = ("br", "p", "div", "ul", "ol", "table", "hr", "blockquote",
+                  "h1", "h2", "h3", "h4", "h5", "h6")
+
+
+def _anchor_is_italic(a):
+    """True when all of the anchor's visible text is italic (an <i>/<em> or
+    font-style:italic element inside or around it)."""
+    text = " ".join(a.get_text(" ", strip=True).split())
+    for d in list(a.find_all(True)) + list(a.parents):
+        if d.name in ("[document]", "p", "div", "body", "html", "li", "td"):
+            break
+        st = (d.get("style") or "").replace(" ", "").lower()
+        if d.name in ("i", "em") or "font-style:italic" in st:
+            if text and text in " ".join(d.get_text(" ", strip=True).split()):
+                return True
+    return False
+
+
+def _embedded_label_html(small):
+    """Render a label <small> whose text contains one embedded link (see
+    _label_embedded_link_info) as label HTML, keeping that link clickable
+    in the label's crimson color: 'X (<a>CATHOLIC VOTE</a>)'."""
+    a = small.find("a", href=True)
+    parts = []
+    for d in small.descendants:
+        if d is a:
+            name = " ".join(a.get_text(" ", strip=True).split())
+            parts.append(f'<a href="{esc_href(a.get("href", "").strip())}" '
+                         f'target="_blank" style="color:{C["crimson"]};'
+                         f'text-decoration:none;">{name}</a>')
+        elif isinstance(d, NavigableString) and not any(p is a for p in d.parents):
+            parts.append(_html.escape(str(d), quote=False))
+    out = " ".join("".join(parts).replace("\xa0", " ").split()).strip(" :")
+    return re.sub(r'\(\s+', '(', re.sub(r'\s+\)', ')', out))
 
 
 def _get_source_label(link):
@@ -3008,6 +3157,11 @@ def get_news_items(block, _skip_urls=None):
         # preceding item's content, not its own news item.
         if id(link) in _inline_a_ids:
             continue
+        # Link embedded in its item's source label (see
+        # _label_embedded_link_info) -- rendered inside the label of the
+        # headline link that follows it, never as its own item.
+        if _label_embedded_link_info(link) is not None:
+            continue
 
         link_text = clean_inline(link)
         if not link_text:
@@ -3318,12 +3472,22 @@ def get_news_items(block, _skip_urls=None):
         # label (e.g. "X NEWS REPORT") with the article body following as plain
         # text in the same <small><span bold>, and there is NO preceding label.
         body_bold = False
+        label_italic = False
         if not source and excerpts:
             _lt_clean = link_text.rstrip(":").strip()
             _bold_container = (link.find_parent(
                             "span", style=lambda s: s and "font-weight" in (s or ""))
                         or link.find_parent("b"))
             _in_bold = _bold_container is not None
+            # Same self-labeling heading when the bold sits INSIDE the anchor
+            # and the anchor stands alone on its line, e.g.
+            #   <a href="..."><small><span bold italic>THE MIDTERMS</span>
+            #   </small></a><br>  followed by the article's paragraphs.
+            _heading_anchor = (not _in_bold
+                               and _is_bold_heading_anchor(link))
+            if _heading_anchor:
+                _in_bold = True
+                label_italic = _anchor_is_italic(link)
             # A leading "LABEL:" segment counts as self-labeling even if a
             # mixed-case title follows in the same link (e.g. "CHURCH
             # FATHERS: The Didache") -- only the label itself need be
@@ -3348,11 +3512,16 @@ def get_news_items(block, _skip_urls=None):
                 # rather than a quoted papal/saint pull-quote handled by
                 # get_collect), preserve that bold styling instead of
                 # flattening it to a normal-weight paragraph.
-                _container_text = " ".join(_bold_container.get_text(" ", strip=True).split())
-                body_bold = all(
-                    " ".join(re.sub(r'<[^>]+>', '', e).split()).strip() in _container_text
-                    for e in excerpts
-                )
+                if _bold_container is not None:
+                    _container_text = " ".join(
+                        _bold_container.get_text(" ", strip=True).split())
+                    body_bold = all(
+                        " ".join(re.sub(r'<[^>]+>', '', e).split()).strip()
+                        in _container_text
+                        for e in excerpts
+                    )
+            else:
+                label_italic = False
         # Headline link that opens a fully-bold <small> block which ALSO
         # holds the item's body (e.g. "<small><a bold>CBCN 2026 Plenary
         # Assembly</a><span bold> :The dignity...</span></small>") -- keep
@@ -3536,6 +3705,7 @@ def get_news_items(block, _skip_urls=None):
             "feature_items": feature_items,
             "body_bold":     body_bold,
             "body_small":    body_small,
+            "label_italic":  label_italic,
         })
 
     # A bare "DONATE" item is never independent content — it's always a
@@ -3600,7 +3770,7 @@ def h_subhead(frag):
 
 
 def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=False,
-           body_small=False, attribution=""):
+           body_small=False, attribution="", label_italic=False):
     """Build one news item: source label + linked title + excerpts + ✦ feature table.
     When feature_items exist and there are multiple excerpts, the last excerpt is
     treated as a concluding paragraph and rendered AFTER the bullet list.
@@ -3612,12 +3782,21 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
     for other small-bold source blocks (collect/social quote boxes).
     attribution is a small bold-italic author byline closing the item's
     quoted text (see _is_byline), rendered last inside the card.
+    label_italic keeps the italics of a bold-italic source heading used as
+    the item's (self-labeling) source label, e.g. "<a><small><span bold
+    italic>THE MIDTERMS</span></small></a>".
     """
     _weight = "font-weight:bold;" if body_bold else ""
     _size = "13px" if body_small else "15px"
+    _label_style = "font-style:italic;" if label_italic else ""
     # The excerpt walkers join a kept line break as "<br> "; drop that space
     # so the markup matches the source ("Pius IX:<br>Ineffabilis Deus").
-    all_excerpts = [re.sub(r'<br>[ \t\r\n]+', '<br>', p)
+    # Leading/trailing whitespace or <br> inside a paragraph (e.g. a source
+    # "<p>Vote on or before November 3rd.<br>\n</p>") is meaningless once the
+    # text is its own <p> -- trim it rather than leaving " \n" before </p>.
+    _edge_ws = r'(?:\s|&nbsp;|\u00a0|<br\s*/?>)+'
+    all_excerpts = [re.sub(rf'^{_edge_ws}|{_edge_ws}$', '',
+                           re.sub(r'<br>[ \t\r\n]+', '<br>', p))
                     for p in (excerpts or []) if p.strip(": \u00a0")]
 
     _last_is_label = bool(all_excerpts) and (
@@ -3735,7 +3914,7 @@ def h_news(source, url, link_text, excerpts=None, feature_items=None, body_bold=
         label_html = (
             f'<div style="font-family:Verdana,Arial,sans-serif;font-size:10px;'
             f'font-weight:bold;letter-spacing:2px;text-transform:uppercase;'
-            f'color:{C["crimson"]};margin-bottom:4px;">'
+            f'{_label_style}color:{C["crimson"]};margin-bottom:4px;">'
             f'<a href="{esc_href(url)}" target="_blank" style="color:{C["crimson"]};'
             f'text-decoration:none;">{source}</a></div>'
         )
@@ -3977,6 +4156,12 @@ def _detect_inline_and_clusters(soup):
         # Those aren't visible content — treating them as cluster members
         # would falsely promote the previous link to a cluster primary.
         if not a.get_text(strip=True):
+            continue
+        # A link embedded in a source label ("X (<a>CATHOLIC VOTE</a>):
+        # <a>Headline</a>") is part of the label, not a cluster primary --
+        # otherwise the real headline after it is misread as an inline
+        # continuation and the label is cut off at the "(".
+        if _label_embedded_link_info(a) is not None:
             continue
         # The nearest enclosing <p>/<li> is this document's actual paragraph
         # unit. Two anchors in DIFFERENT such containers are never the same
@@ -4520,6 +4705,7 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
             item.get("body_bold", False),
             item.get("body_small", False),
             item.get("attribution", ""),
+            item.get("label_italic", False),
         )
     # Anything still pending came after every news item (or there were none).
     while _pending_idx < len(_pending):
@@ -5192,10 +5378,27 @@ def fidelity_check(entry, out_html):
         seen.add((href, text)); total += 1
         if href not in out_norm or text not in out_norm:
             missing_links.append((text[:60], href))
+    def _vis(s):
+        return " ".join(s.replace("\xa0", " ").split())
+    out_soup = BeautifulSoup(out_html, "html.parser")
+    for t in out_soup(["script", "style"]):
+        t.decompose()
+    out_text = _vis(out_soup.get_text(" "))
+    out_text_nosp = out_text.replace(" ", "")
     missing_labels, lbl_total, seen_l = [], 0, set()
     for sm in soup.find_all("small"):
         t = " ".join(sm.get_text(" ", strip=True).split()).strip(" :")
         a_in = sm.find("a")
+        # A label with its own embedded link ("X (<a>CATHOLIC VOTE</a>)")
+        # is rendered whole, link included -- check its full visible text
+        # (ignoring the spacing the tag boundaries add around the link).
+        if a_in is not None and a_in.get("href") \
+                and _label_embedded_link_info(a_in) is not None:
+            if t and t not in seen_l:
+                seen_l.add(t); lbl_total += 1
+                if t.replace(" ", "") not in out_text_nosp:
+                    missing_labels.append(t[:70])
+            continue
         if a_in is not None:
             at = " ".join(a_in.get_text(" ", strip=True).split())
             t = t.replace(at, "").strip(" :")
@@ -5207,13 +5410,6 @@ def fidelity_check(entry, out_html):
     # Body text: every source sentence-length text run should appear in the
     # output's visible text. Catches prose silently dropped or cut off
     # mid-article, which the link/label counts above can't see.
-    def _vis(s):
-        return " ".join(s.replace("\xa0", " ").split())
-    out_soup = BeautifulSoup(out_html, "html.parser")
-    for t in out_soup(["script", "style"]):
-        t.decompose()
-    out_text = _vis(out_soup.get_text(" "))
-    out_text_nosp = out_text.replace(" ", "")
     missing_text, txt_total = [], 0
     for s in soup.find_all(string=True):
         if s.parent is not None and s.parent.name in ("script", "style"):
