@@ -238,13 +238,57 @@ def fix_stray_quote_spaces(html):
 # straight ' closing a plural possessive before the next word ("bishops'
 # conference"). A straight ' that could be an opening quote (before a word)
 # is never touched.
-_APOSTROPHE_RE = re.compile(r"ʼ|(?<=[A-Za-z])'(?=[A-Za-z])|(?<=s)'(?= [a-z])")
+_APOSTROPHE_RE = re.compile(r"ʼ|(?<=[A-Za-z])'(?=[A-Za-z])|(?<=s)'(?= [A-Za-z])")
 
 
 def fix_apostrophes(html):
     """Normalize apostrophes in the raw news.html text to the curly ’.
     Returns (fixed_html, list_of_fixed_snippets)."""
     return _fix_text_segments(html, _APOSTROPHE_RE, '’')
+
+
+# Tags that end a line of text, so a straight " right after one opens a
+# quote no matter what character came before the tag.
+_QUOTE_RESET_TAG_RE = re.compile(
+    r'<\s*/?\s*(?:br|p|div|li|ul|ol|td|th|tr|table|blockquote|hr|h[1-6])\b',
+    re.IGNORECASE)
+_QUOTE_OPENERS = "([{—–-/‘'"
+
+
+def curl_double_quotes(html):
+    """Turn straight " in the text of generated entry HTML (never tags,
+    scripts or styles) into curly “ / ”, matching the curly quotes news.html
+    already uses in places. A quote is an opener when it follows whitespace,
+    the start of a line, or an opening bracket/dash; otherwise it closes.
+    The preceding character is tracked across inline tags, so a closing
+    quote right after a link ('<a>Title</a>"') still closes.
+
+    Run on the converter's OUTPUT, not on the raw news.html: many of the
+    parser's label/quote heuristics test for a straight '"' only."""
+    parts = re.split(r'(<script\b.*?</script>|<style\b.*?</style>|<[^>]+>)',
+                     html, flags=re.DOTALL | re.IGNORECASE)
+    prev = " "
+    for i, seg in enumerate(parts):
+        if i % 2:   # a tag
+            if seg[:7].lower() in ("<script", "<style") or _QUOTE_RESET_TAG_RE.match(seg):
+                prev = " "
+            continue
+        if not seg:
+            continue
+        out = []
+        for j, ch in enumerate(seg):
+            if ch == '"':
+                if seg[:j].endswith(("&nbsp;", "&#160;")):
+                    p = " "
+                else:
+                    p = seg[j - 1] if j else prev
+                ch = "“" if (p.isspace() or p in _QUOTE_OPENERS) else "”"
+            out.append(ch)
+        parts[i] = "".join(out)
+        prev = parts[i][-1]
+        if parts[i].endswith(("&nbsp;", "&#160;")):
+            prev = " "
+    return "".join(parts)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1775,7 +1819,11 @@ def _leads_with_small_label(container, inner_a):
     test, so without this the next item's whole paragraph was absorbed
     into the preceding item as if the link were inline prose. A <br>
     between label and link (e.g. a multi-turn interview whose link only
-    appears in a later turn) means it's not a label+headline shape."""
+    appears in a later turn) means it's not a label+headline shape.
+    A trailing parenthetical inside the label itself (e.g. "EXCERPT HOMILY
+    OF HIS HOLINESS BENEDICT XVI (1 November 2006)") is a dateline note,
+    not part of the ALL-CAPS test, and such descriptive labels run longer
+    than the usual short source name."""
     label, rest = None, ""
     for c in container.children:
         if c is inner_a or (hasattr(c, "descendants")
@@ -1787,8 +1835,9 @@ def _leads_with_small_label(container, inner_a):
             if getattr(c, "name", None) != "small":
                 return False
             label = " ".join(c.get_text(" ", strip=True).split()).strip(" :")
+            label = re.sub(r"\s*\([^()]*\)$", "", label)
             letters = "".join(ch for ch in label if ch.isalpha())
-            if not (label and letters and len(label) <= 40
+            if not (label and letters and len(label) <= 60
                     and letters == letters.upper()
                     and '"' not in label and '“' not in label):
                 return False
@@ -4482,7 +4531,7 @@ color:{C['ink_mid']};margin:0;line-height:1.6;">{sr_text}</p>
     out += h_ladder(get_ladder(block), _step_num, _step_title)
 
     # Safety net: restore anything the heuristics dropped
-    return esc_bare_amp(repair_entry(entry, out))
+    return curl_double_quotes(esc_bare_amp(repair_entry(entry, out)))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -5037,8 +5086,13 @@ def prepend_to_archive(archive_path, entries):
 def fidelity_check(entry, out_html):
     """Compare the newest source entry against the generated page; warn about any
     link, headline, or source label that did not survive. Advisory only."""
+    # The generated entry HTML has its straight " curled (curl_double_quotes);
+    # fold both sides to straight so a quoted passage still matches.
+    def _fold(s):
+        return s.replace("“", '"').replace("”", '"')
+    out_html = _fold(out_html)
     out_norm = " ".join(out_html.replace("&amp;", "&").split())
-    soup = BeautifulSoup(entry["block"], "html.parser")
+    soup = BeautifulSoup(_fold(entry["block"]), "html.parser")
     # Inline continuation links are not standalone items (see
     # _detect_inline_continuation_ids). Don't flag them as missing —
     # they were intentionally not rendered as separate cards.
