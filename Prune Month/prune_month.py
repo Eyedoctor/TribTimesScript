@@ -50,6 +50,7 @@ DESIGN NOTES
 from __future__ import annotations
 
 import argparse
+import codecs
 import datetime as _dt
 import re
 import shutil
@@ -62,6 +63,47 @@ except ImportError:
     print("ERROR: this script requires beautifulsoup4. Install with:")
     print("    pip install beautifulsoup4")
     sys.exit(1)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TOLERANT FILE READING
+# ═══════════════════════════════════════════════════════════════════════════
+# The site's HTML files come from several editors over many years. Most are
+# UTF-8, but some (older KompoZer/SeaMonkey saves, text pasted from Windows
+# programs) contain stray single bytes in the Windows-1252 code page, such as
+# « » or curly quotes. A strict UTF-8 read crashes on those. This reader
+# keeps every valid UTF-8 sequence exactly as it is and decodes only the
+# stray bytes as Windows-1252, so a mixed file reads correctly too.
+
+def _cp1252_fallback(exc):
+    if not isinstance(exc, UnicodeDecodeError):
+        raise exc
+    bad = exc.object[exc.start:exc.start + 1]
+    try:
+        return bad.decode("cp1252"), exc.start + 1
+    except UnicodeDecodeError:          # the few bytes cp1252 leaves undefined
+        return bad.decode("latin-1"), exc.start + 1
+
+
+codecs.register_error("cp1252_fallback", _cp1252_fallback)
+
+
+def _read_html(path, will_rewrite=False):
+    """Read an HTML file as text. Never fails on encoding. When the file is
+    not clean UTF-8, say so; for a file the script will write back
+    (will_rewrite=True) also say it will be saved as UTF-8 — correct for
+    these pages, which all declare charset UTF-8."""
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("utf-8", errors="cp1252_fallback")
+        note = (f"  Note: {path.name} is not pure UTF-8 (it has older "
+                f"Windows-1252 characters); read it anyway.")
+        if will_rewrite:
+            note += " It will be saved back as UTF-8."
+        print(note)
+        return text
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -391,7 +433,7 @@ def refresh_template(target_year, target_month, folder,
     print(f"  Prev-month archive: {archive_path.name}")
 
     # Load prev-month archive and find last quote used
-    archive_html = archive_path.read_bytes().decode('utf-8')
+    archive_html = _read_html(archive_path)
     last_step, last_num = _get_last_ladder_used(archive_html)
     if last_step is None:
         print(f"  ✗ No Ladder quotes found in {archive_path.name}.")
@@ -410,7 +452,7 @@ def refresh_template(target_year, target_month, folder,
     print(f"  Last Ladder quote used: Step {last_step} #{last_num}")
 
     # Load template first (we need the count for figuring out how many quotes)
-    template_html = template.read_bytes().decode('utf-8')
+    template_html = _read_html(template, will_rewrite=True)
     date_matches = list(_TEMPLATE_DATE_RE.finditer(template_html))
     entry_count = len(date_matches)
     if entry_count == 0:
@@ -460,7 +502,7 @@ def refresh_template(target_year, target_month, folder,
             print(f"  ✗ source file not found: {sp}")
             return False
         used_sources.append(sp)
-        src_html = sp.read_bytes().decode('utf-8')
+        src_html = _read_html(sp)
         _unread = []
         _parse_ladder_quotes(src_html, _unread)
         unreadable_in_sources.extend((sp.name, u) for u in _unread)
@@ -988,8 +1030,7 @@ def main():
     # (CRLF on Windows-authored files, LF elsewhere). Path.read_text/write_text
     # normalizes newlines and would touch every line even when the substantive
     # change is a single cell.
-    html_bytes = path.read_bytes()
-    html = html_bytes.decode("utf-8")
+    html = _read_html(path, will_rewrite=True)
 
     # Step 1
     print("\nStep 1: removing daily entry cards ...")
@@ -1013,24 +1054,24 @@ def main():
     else:
         print(f"  ✗ could not find slot for {abbr} {year} in archive table.")
 
-    # Nothing changed?
+    # Write news2.html only if something changed. Either way, carry on to the
+    # optional template refresh below: after a retry (for example when the
+    # template step stopped earlier) news2.html is already done, and the
+    # template step must still get its turn.
     if not cards_removed and action != "added":
-        print("\nNo changes to write.")
-        return
+        print("\nnews2.html: nothing to change — already up to date.")
+    elif dry_run:
+        print("\nDry-run — news2.html not written.")
+    else:
+        # Backup and write
+        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = path.with_name(f"news2_backup_{stamp}_prune.html")
+        shutil.copy2(path, backup)
+        print(f"\nBackup: {backup.name}")
+        path.write_bytes(html.encode("utf-8"))
+        print(f"Wrote: {path.name}")
 
-    if dry_run:
-        print("\nDry-run complete — no file written.")
-        return
-
-    # Backup and write
-    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup = path.with_name(f"news2_backup_{stamp}_prune.html")
-    shutil.copy2(path, backup)
-    print(f"\nBackup: {backup.name}")
-    path.write_bytes(html.encode("utf-8"))
-    print(f"Wrote: {path.name}")
-
-    print(f"\n✓ Done. Preview {path.name} in your browser before uploading.")
+        print(f"\n✓ Done. Preview {path.name} in your browser before uploading.")
 
     # ---- Optional Step 3: refresh template.html for next month ----
     should_refresh = refresh_flag
