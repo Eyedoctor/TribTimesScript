@@ -247,6 +247,13 @@ def fix_apostrophes(html):
     return _fix_text_segments(html, _APOSTROPHE_RE, '’')
 
 
+def fix_text_fragment_links(html):
+    """Restore the literal ":~:" of highlight links ("...#:~:text=..."). The
+    WYSIWYG editor can save it as "#:%7E:", which browsers don't recognize,
+    so the link opens the page without jumping to the quoted passage."""
+    return re.sub(r'#:%7E:', '#:~:', html, flags=re.IGNORECASE)
+
+
 # Tags that end a line of text, so a straight " right after one opens a
 # quote no matter what character came before the tag.
 _QUOTE_RESET_TAG_RE = re.compile(
@@ -3097,11 +3104,17 @@ def get_news_items(block, _skip_urls=None):
         # The heading's <small> is often the sole real content of its own
         # wrapping <span>/<p> (e.g. "<span><small>...</small><br></span>"),
         # in which case the <ul> is a sibling of that wrapper, not of the
-        # <small> itself — check both.
+        # <small> itself — check both. A plain <p> counts as that wrapper too
+        # when the heading is all it holds ('<p><small><span bold>RELATED
+        # </span></small><br></p>' then the <ul>), unless the heading is
+        # italic, which marks a cluster subheading as above.
         _list_tag = _next_list_tag(_sm.next_sibling)
-        if _list_tag is None and _sm.parent is not None and (
-                _sm.parent.name == "span" or _sm.parent is _bold_p):
-            _list_tag = _next_list_tag(_sm.parent.next_sibling)
+        _par = _sm.parent
+        if _list_tag is None and _par is not None and (
+                _par.name == "span" or _par is _bold_p
+                or (_par.name == "p" and "font-style:italic" not in _st
+                    and _par.get_text(" ", strip=True) == _sm.get_text(" ", strip=True))):
+            _list_tag = _next_list_tag(_par.next_sibling)
         if _list_tag is None or id(_list_tag) in _headline_owned_lists:
             continue
         _li_links = []
@@ -5465,6 +5478,7 @@ def main():
         raw = _data.decode("cp1252", errors="replace")
         print("  Note: news.html is not valid UTF-8 — decoded as Windows-1252.")
     raw = strip_session_junk_params(raw)
+    raw = fix_text_fragment_links(raw)
     raw, _space_fixes = fix_missing_sentence_spaces(raw)
     if _space_fixes:
         print("  Added a missing space after a period (consider fixing news.html too):")
