@@ -1124,6 +1124,51 @@ def _embedded_label_html(small):
     return re.sub(r'\(\s+', '(', re.sub(r'\s+\)', ')', out))
 
 
+def _is_short_caps_label(t):
+    t = " ".join(t.split()).strip(" :\xa0")
+    letters = "".join(ch for ch in t if ch.isalpha())
+    return bool(t and letters and len(t) <= 40 and letters == letters.upper()
+                and not t.startswith("(") and '"' not in t and '“' not in t)
+
+
+def _label_small_before(small, link):
+    """Pattern A2 helper for _get_source_label: label <small> immediately
+    preceding a <small> that `link` opens. Returns the label or ""."""
+    def _blank(n):
+        return isinstance(n, NavigableString) and not str(n).strip(" :\n\xa0\t\r")
+    lead = next((c for c in small.contents if not _blank(c)), None)
+    if lead is None or not (lead is link or (hasattr(lead, "find")
+                                             and lead.find("a", href=True) is link)):
+        return ""
+    prev = small.previous_sibling
+    while prev is not None and _blank(prev):
+        prev = prev.previous_sibling
+    if prev is None or not hasattr(prev, "name"):
+        return ""
+    if prev.name == "small":
+        label_el = prev
+    elif prev.name in ("span", "b"):
+        inner = prev.find_all("small")
+        if not inner:
+            return ""
+        label_el = inner[-1]
+        # The label <small> must END the wrapper -- only ":"/whitespace
+        # may follow it inside the wrapper.
+        for s in label_el.find_all_next(string=True):
+            if not any(p is prev for p in s.parents):
+                break
+            if any(p is label_el for p in s.parents):
+                continue
+            if str(s).strip(" :\n\xa0\t\r"):
+                return ""
+    else:
+        return ""
+    if label_el.find("a", href=True) is not None:
+        return ""
+    t = " ".join(label_el.get_text(" ", strip=True).split()).strip(" :\xa0")
+    return t if _is_short_caps_label(t) else ""
+
+
 def _get_source_label(link):
     """
     Extract the source label for a news link using pattern-aware logic.
@@ -1193,6 +1238,16 @@ def _get_source_label(link):
         source = re.sub(r'\(\s*\)', '', source).strip(" :")
         if source and len(source) > 2:
             return source
+        # Pattern A2: the link OPENS its own <small> (no label inside it) and
+        # the label is a separate <small> right before that one -- either
+        # as a sibling or as the trailing content of a preceding wrapper,
+        # e.g. "<span>...scripture...<br><br><small><span bold>CATECHISM
+        # </span></small>: </span><small><a>1999</a><span bold>The grace
+        # ...</span></small>". Only the immediately preceding element is
+        # considered, and only a short ALL-CAPS label is accepted.
+        _a2 = _label_small_before(small_parent, link)
+        if _a2:
+            return _a2
 
     # Pattern B: link is NOT inside <small> — walk backward through siblings
     prev = link.previous_sibling
@@ -1757,6 +1812,27 @@ def _is_label_fragment(t):
     return t.startswith("<strong") or t.startswith(ITALIC_SUBHEAD_OPEN)
 
 
+# Marks plain-weight prose inside an otherwise bold small-block body (see
+# _small_is_prose_body); get_news_items ignores these spans when deciding
+# whether the body was entirely inside the bold <small>.
+_NORMAL_WEIGHT_STYLE = "font-weight:normal;"
+_NORMAL_WEIGHT_SPAN_RE = re.compile(
+    r'<span style="font-weight:normal;">.*?</span>', re.S)
+
+
+def _small_is_prose_body(node):
+    """True for a link-free <small> holding running sentence prose (long,
+    mixed-case) rather than a source label or short subheading -- e.g. the
+    non-bold continuation of a CATECHISM quote, "<small><a>1999</a><span
+    bold>...sanctification: </span></small><small>Therefore if any one is
+    in Christ...</small>". Such a block can't be the NEXT item's label even
+    when a link follows it, so it must not end the excerpt walk."""
+    if node.find("a", href=True) is not None:
+        return False
+    t = " ".join(node.get_text(" ", strip=True).split())
+    return len(t) > 80 and any(ch.islower() for ch in t)
+
+
 def _is_colon_only_wrapper(node):
     """True for an inline tag whose entire text is a lone ":" -- the editor's
     way of un-bolding a headline's trailing colon, e.g.
@@ -2224,8 +2300,11 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                         lh = inner_link.get("href", "")
                         if lt and lh and not lh.startswith("mailto:"):
                             has_link_ahead = True
-                    # Check (b): look at next siblings for a link
-                    if not has_link_ahead:
+                    # Check (b): look at next siblings for a link -- unless
+                    # this <small> is itself running prose, which is body
+                    # text of the current item, never the next item's label.
+                    _prose_small = _small_is_prose_body(nxt)
+                    if not has_link_ahead and not _prose_small:
                         peek = nxt.next_sibling
                         checked = 0
                         while peek is not None and checked < 3:
@@ -2279,6 +2358,14 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                         # <b>The Prayer of Teresa of Ávila</b></small></a>:
                         # <small><b>"Let nothing disturb you..."</b></small>").
                         # Previously dropped outright.
+                        if (_prose_small and excerpts
+                                and not _small_block_is_bold(nxt)):
+                            # Plain-weight prose continuing a (possibly bold)
+                            # body -- mark it so a bold-body card keeps this
+                            # part at normal weight, as in the source.
+                            subheading_text = (
+                                f'<span style="{_NORMAL_WEIGHT_STYLE}">'
+                                f'{" ".join(subheading_text.split())}</span>')
                         add(subheading_text)
                 elif name == "a":
                     # An <a> that wraps a bold/small source label is the header
@@ -3546,8 +3633,14 @@ def get_news_items(block, _skip_urls=None):
         if (not body_bold and excerpts and _body_small_anc is not None
                 and _small_block_is_bold(_body_small_anc)):
             _small_text = " ".join(_body_small_anc.get_text(" ", strip=True).split())
-            if all(" ".join(re.sub(r'<[^>]+>', '', e).split()).strip() in _small_text
-                   for e in excerpts):
+            # Plain-weight continuation prose that followed the bold
+            # <small> in the source (marked by get_following_excerpts) is
+            # rendered at normal weight inside the bold body -- exclude it
+            # from the "whole body was bold" test.
+            _bold_parts = [" ".join(re.sub(r'<[^>]+>', '',
+                                           _NORMAL_WEIGHT_SPAN_RE.sub('', e)).split()).strip()
+                           for e in excerpts]
+            if any(_bold_parts) and all(bp in _small_text for bp in _bold_parts):
                 body_bold = body_small = True
         # Same emphasis when the body is instead a fully-bold <small> SIBLING
         # following the link on the same line (e.g. "<a><small><b>The Prayer
