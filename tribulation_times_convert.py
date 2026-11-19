@@ -2348,7 +2348,15 @@ def get_following_excerpts(link, _ladder_text="", _current_url="", _consumed=Non
                         return True  # source label for next item — stop
                     # Section subheading — only add if short and contains no quotes
                     subheading_text = nxt.get_text(" ", strip=True)
-                    if (subheading_text and len(subheading_text) <= 80
+                    # A bold-italic <small> on its own line is a heading even
+                    # past 80 chars when it isn't running prose, e.g. "ACT OF
+                    # DEDICATION OF THE HUMAN RACE TO JESUS CHRIST KING (IESU
+                    # DULCISSIME, REDEMPTOR)" over the prayer's text.
+                    _max_sub = 80
+                    if (not _prose_small and len(subheading_text) <= 160
+                            and _inline_style_flags(nxt) == (True, True)):
+                        _max_sub = 160
+                    if (subheading_text and len(subheading_text) <= _max_sub
                             and '"' not in subheading_text
                             and '“' not in subheading_text):
                         add(_label_or_subhead(subheading_text, nxt))
@@ -3709,6 +3717,24 @@ def get_news_items(block, _skip_urls=None):
                     and " ".join(excerpts[0].split()) == _title):
                 link_text = _title
                 excerpts = excerpts[1:]
+        # Same idea when the label wraps its link in parentheses and NO
+        # headline link follows (that case is _label_embedded_link_info's),
+        # e.g. "<small><span bold>VIA X (<a>Father V</a>)</span></small>: A
+        # partial indulgence...". The whole "VIA X (Father V)" is the label,
+        # with the name kept clickable -- not a "VIA X (" label over a bare
+        # "Father V" headline.
+        elif (url and _lt_plain and len(_lt_plain) <= 40
+                and link.find_parent("small") is not None
+                and isinstance(_prev_s, NavigableString)
+                and isinstance(link.next_sibling, NavigableString)
+                and str(link.next_sibling).strip(" \xa0\n\t\r:") == ")"):
+            _pre = " ".join(str(_prev_s).replace("\xa0", " ").split())
+            if _pre.endswith("(") and _is_short_caps_label(_pre[:-1]):
+                source = (f'{_pre[:-1].strip()} (<a href="{esc_href(url)}" '
+                          f'target="_blank" style="color:{C["crimson"]};'
+                          f'text-decoration:none;">{_lt_plain}</a>)')
+                link_text = ""
+                url = ""
         # X/Twitter links become news items only when explicitly labeled
         # (e.g. "VIDEO CATHOLIC VOTE:"); bare/embedded social links are skipped.
         if ("x.com/" in url or "twitter.com/" in url) and not source:
@@ -5498,8 +5524,13 @@ def fidelity_check(entry, out_html):
         # A label with its own embedded link ("X (<a>CATHOLIC VOTE</a>)")
         # is rendered whole, link included -- check its full visible text
         # (ignoring the spacing the tag boundaries add around the link).
+        # Same for a label that just wraps its link in parentheses with no
+        # headline after it ("VIA X (<a>Father V</a>)").
         if a_in is not None and a_in.get("href") \
-                and _label_embedded_link_info(a_in) is not None:
+                and (_label_embedded_link_info(a_in) is not None
+                     or re.fullmatch(r'[^()]+\(\s*'
+                                     + re.escape(" ".join(a_in.get_text(" ", strip=True).split()))
+                                     + r'\s*\)', t)):
             if t and t not in seen_l:
                 seen_l.add(t); lbl_total += 1
                 if t.replace(" ", "") not in out_text_nosp:
