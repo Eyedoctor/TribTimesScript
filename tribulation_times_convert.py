@@ -1048,7 +1048,14 @@ def _is_bold_heading_anchor(a):
         <span><a href="..."><small><span style="font-weight: bold;
         font-style: italic;">THE MIDTERMS</span></small></a><br></span>
     Such an anchor is a section heading over the paragraphs that follow,
-    i.e. a self-labeling source label, not an ordinary headline."""
+    i.e. a self-labeling source label, not an ordinary headline.
+
+    Also true when the anchor is instead followed on its line by the
+    label's colon and the body text, e.g.
+        <p><a href="..."><small><span bold>BISHOP ROBERT BARRON</span>
+        </small></a>:&nbsp; Friends, today we celebrate...</p>
+    -- the bold anchor is still the item's source label, just with its
+    body run in after the colon instead of starting on the next line."""
     text = " ".join(a.get_text(" ", strip=True).split())
     if not text:
         return False
@@ -1084,6 +1091,9 @@ def _is_bold_heading_anchor(a):
                 box.parent.name in ("span", "small", "b", "font", "i", "em"):
             box = box.parent
             continue
+        if (isinstance(nxt, NavigableString)
+                and str(nxt).lstrip(" \xa0\n\t\r").startswith(":")):
+            return True  # "LABEL: body text" run in on the same line
         return nxt is None or getattr(nxt, "name", None) in _LINE_BREAKERS
 
 
